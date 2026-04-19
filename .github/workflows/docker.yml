@@ -6,9 +6,11 @@ on:
     tags: ["v*.*.*"]
   workflow_dispatch:
 
+# Opt into Node.js 24 for all actions (avoids the Node.js 20 deprecation warning)
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   test:
@@ -20,7 +22,7 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-      - run: npm ci
+      - run: npm ci --no-fund
       - run: npm test -- --forceExit
 
   build-and-push:
@@ -85,7 +87,7 @@ jobs:
 
       # ── Provenance attestation ────────────────────────────────────────────
       - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@v4
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.push.outputs.digest }}

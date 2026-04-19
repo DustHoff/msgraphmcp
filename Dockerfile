@@ -1,8 +1,12 @@
+# syntax=docker/dockerfile:1
+# TOKEN_CACHE_PATH is a file path, not a secret — skip the false-positive lint check.
+# check=skip=SecretsUsedInArgOrEnv
+
 FROM node:20-alpine AS builder
 
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci
+RUN npm ci --no-fund --silent
 
 COPY tsconfig.json ./
 COPY src ./src
@@ -17,7 +21,7 @@ WORKDIR /app
 RUN mkdir -p /data && chown node:node /data
 
 COPY package*.json ./
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev --no-fund --silent
 
 COPY --from=builder /app/dist ./dist
 
