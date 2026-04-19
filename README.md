@@ -4,7 +4,7 @@
 [![Docker](https://github.com/DustHoff/msgraphmcp/actions/workflows/docker.yml/badge.svg)](https://github.com/DustHoff/msgraphmcp/actions/workflows/docker.yml)
 [![GHCR](https://img.shields.io/badge/ghcr.io-msgraphmcp-blue?logo=github)](https://github.com/DustHoff/msgraphmcp/pkgs/container/msgraphmcp)
 
-**MCP Server for the Microsoft Graph API** — runs as a container, exposes **115+ tools** across all major Microsoft 365 workloads to any MCP-compatible client such as [Claude Code](https://claude.ai/code), and supports three authentication modes: **client secret**, **client certificate** (recommended for Kubernetes), and **device code** (interactive, local use).
+**MCP Server for the Microsoft Graph API** — runs as a container, exposes **115+ tools** across all major Microsoft 365 workloads to any MCP-compatible client such as [Claude Code](https://claude.ai/code), and supports four authentication modes: **authorization code + PKCE** (delegated, recommended for Kubernetes/HTTP), **client secret** (app-only), **client certificate** (app-only, recommended for production), and **device code** (interactive, local use).
 
 ---
 
@@ -47,8 +47,8 @@ Claude Code (MCP client)
        │  stdio / HTTP
        ▼
   msgraphmcp (Node.js / TypeScript)
-  ├── auth/TokenManager     Three auth modes (see below)
-  ├── graph/GraphClient     Axios wrapper, auto-pagination, retry on 401
+  ├── auth/TokenManager     Four auth modes (see below)
+  ├── graph/GraphClient     Axios wrapper, auto-pagination, single retry on 401
   └── tools/
       ├── users · mail · calendar · files · groups
       ├── teams · contacts · tasks · sites
@@ -56,6 +56,9 @@ Claude Code (MCP client)
        │  HTTPS
        ▼
   Microsoft Graph API  (https://graph.microsoft.com/v1.0)
+
+HTTP mode auth flow (authorization code):
+  Browser → GET /auth/login → Microsoft Login → GET /auth/callback → tokens cached
 ```
 
 Token cache is persisted to disk (`/data/tokens.json` in the container) and mounted as a Docker volume so tokens survive restarts without re-authentication.
@@ -79,11 +82,14 @@ Token cache is persisted to disk (`/data/tokens.json` in the container) and moun
 1. Open [Azure Portal → App registrations](https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade) → **New registration**.
 2. **Name**: `msgraphmcp` (or any name)
 3. **Supported account types**: *Accounts in this organizational directory only* (or *multitenant* if needed)
-4. **Redirect URI** *(device code flow only)*: select **Mobile and desktop applications** → `https://login.microsoftonline.com/common/oauth2/nativeclient`
+4. **Redirect URI** — depends on the auth mode you plan to use:
+   - **Authorization code flow (Mode A):** select **Web** → enter your callback URL, e.g. `https://msgraph.example.com/auth/callback`
+   - **Device code flow (Mode D):** select **Mobile and desktop applications** → `https://login.microsoftonline.com/common/oauth2/nativeclient`
+   - **App-only (Modes B/C):** no redirect URI needed
 5. Click **Register** — copy the **Application (client) ID** and **Directory (tenant) ID**.
 6. **Add permissions** — the type depends on the auth mode you choose:
 
-   - **Device code flow (delegated):** Go to **API Permissions → Add a permission → Microsoft Graph → Delegated permissions** and add the permissions below, then click **Grant admin consent**.
+   - **Authorization code / device code (delegated):** Go to **API Permissions → Add a permission → Microsoft Graph → Delegated permissions** and add the permissions below, then click **Grant admin consent**.
    - **Client secret / certificate (app-only):** Go to **API Permissions → Add a permission → Microsoft Graph → Application permissions** and add the same permissions, then click **Grant admin consent**.  
      > With app-only auth, `userId: "me"` does not resolve — use explicit UPNs or object IDs in all tool calls.
 
@@ -211,10 +217,11 @@ Restart Claude Code after editing the config — the server appears in the MCP t
 |---|---|---|---|
 | `AZURE_CLIENT_ID` | **Yes** | — | App Registration client ID |
 | `AZURE_TENANT_ID` | No | `common` | Tenant ID or `common` for multi-tenant |
-| `AZURE_CLIENT_SECRET` | No | — | **Auth mode A** — client secret; enables app-only (client credentials) flow |
-| `AZURE_CLIENT_CERTIFICATE_PATH` | No | — | **Auth mode B** — path to a PEM private key file; must be set together with `THUMBPRINT` |
-| `AZURE_CLIENT_CERTIFICATE_THUMBPRINT` | No | — | **Auth mode B** — SHA-256 certificate thumbprint (64 hex chars) from the App Registration |
-| `GRAPH_SCOPES` | No | all scopes | Space-separated delegated scopes (only used in device code mode) |
+| `AZURE_CLIENT_SECRET` | No | — | Client secret — required for **Mode A** (auth code) and **Mode B** (app-only) |
+| `AZURE_REDIRECT_URI` | No | — | **Auth mode A** — full callback URL, e.g. `https://msgraph.example.com/auth/callback`. When set together with `AZURE_CLIENT_SECRET`, activates the authorization code flow |
+| `AZURE_CLIENT_CERTIFICATE_PATH` | No | — | **Auth mode C** — path to a PEM private key file; must be set together with `THUMBPRINT` |
+| `AZURE_CLIENT_CERTIFICATE_THUMBPRINT` | No | — | **Auth mode C** — SHA-256 certificate thumbprint (64 hex chars) from the App Registration |
+| `GRAPH_SCOPES` | No | all scopes | Space-separated delegated scopes (used in auth code and device code modes) |
 | `TOKEN_CACHE_PATH` | No | `/data/tokens.json` | Path to the MSAL token cache file |
 | `PORT` | No | — | When set, the server listens on HTTP (Kubernetes mode); otherwise uses stdio |
 | `LOG_LEVEL` | No | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
@@ -223,11 +230,60 @@ Restart Claude Code after editing the config — the server appears in the MCP t
 
 ## Authentication Flow
 
-Three modes are selected automatically by which environment variables are set:
+Four modes are selected automatically by which environment variables are set:
 
-### Mode A — Client Secret (app-only)
+| Mode | Env vars set | Type | User context |
+|---|---|---|---|
+| **A — Authorization Code** | `AZURE_CLIENT_SECRET` + `AZURE_REDIRECT_URI` | Delegated | Yes — full `userId: "me"` support |
+| **B — Client Secret** | `AZURE_CLIENT_SECRET` (no redirect URI) | App-only | No — use explicit UPNs/object IDs |
+| **C — Client Certificate** | `AZURE_CLIENT_CERTIFICATE_PATH` + `THUMBPRINT` | App-only | No |
+| **D — Device Code** | none of the above | Delegated | Yes |
 
-Set `AZURE_CLIENT_SECRET`. Recommended for automated / server deployments without Conditional Access issues.
+### Mode A — Authorization Code + PKCE (delegated, recommended for HTTP/Kubernetes)
+
+Set `AZURE_CLIENT_SECRET` **and** `AZURE_REDIRECT_URI`. The user signs in once via a browser; tokens are cached on disk and refreshed silently. Suitable for containers with Entra ID Conditional Access — CA compliance is evaluated against the **user's browser device**, not the container.
+
+**Prerequisites:**
+- Register `AZURE_REDIRECT_URI` (e.g. `https://msgraph.example.com/auth/callback`) as a **Web** redirect URI in the Entra ID app registration.
+- Grant **Delegated** permissions (not Application) + admin consent.
+
+```
+Initial login (one-time)
+  GET /auth/login
+  └─► Server generates PKCE code_verifier + S256 challenge
+  └─► Redirects browser → Microsoft login page
+  └─► User authenticates + consents
+  └─► Microsoft redirects → GET /auth/callback?code=...&state=...
+  └─► Server exchanges code for tokens (acquireTokenByCode)
+  └─► Tokens written to TOKEN_CACHE_PATH
+
+Subsequent requests
+  └─► acquireTokenSilent() — uses cached refresh token
+  └─► On 401: single retry with fresh token, then error
+
+Health check
+  GET /health → { "authenticated": true, "authMode": "authorization-code" }
+```
+
+After deploying, visit `https://<your-host>/auth/login` to authenticate. On success a green confirmation page is shown and the browser can be closed.
+
+**Kubernetes deployment:**
+
+Uncomment the **Option A** block in `k8s/deployment.yaml` and set `AZURE_REDIRECT_URI` to your ingress hostname:
+
+```yaml
+- name: AZURE_CLIENT_SECRET
+  valueFrom:
+    secretKeyRef:
+      name: msgraphmcp-azure
+      key: AZURE_CLIENT_SECRET
+- name: AZURE_REDIRECT_URI
+  value: https://msgraph.example.com/auth/callback
+```
+
+### Mode B — Client Secret (app-only)
+
+Set `AZURE_CLIENT_SECRET` without `AZURE_REDIRECT_URI`. Requires **Application** permissions + admin consent. Recommended for fully automated deployments where no user context is needed.
 
 ```
 Every request
@@ -236,9 +292,9 @@ Every request
   └─► Device compliance CA policies are NOT evaluated — safe in containers
 ```
 
-### Mode B — Client Certificate (app-only, recommended for Kubernetes)
+### Mode C — Client Certificate (app-only, recommended for production)
 
-Set `AZURE_CLIENT_CERTIFICATE_PATH` + `AZURE_CLIENT_CERTIFICATE_THUMBPRINT`. Same flow as Mode A but uses a certificate assertion instead of a shared secret — no secret rotation required.
+Set `AZURE_CLIENT_CERTIFICATE_PATH` + `AZURE_CLIENT_CERTIFICATE_THUMBPRINT`. Same flow as Mode B but uses a certificate assertion instead of a shared secret — no secret rotation required.
 
 ```
 Every request
@@ -264,7 +320,7 @@ kubectl create secret generic msgraphmcp-client-cert --from-file=tls.key -n msgr
 
 Then uncomment the `client-cert` volume in `k8s/deployment.yaml` and set `AZURE_CLIENT_CERTIFICATE_THUMBPRINT` in `k8s/secret.yaml`.
 
-### Mode C — Device Code (delegated, local / interactive)
+### Mode D — Device Code (delegated, local / interactive)
 
 No secret or certificate configured. Suitable for local use and Claude Code stdio integration. **Not recommended in containers under Entra ID Conditional Access device-compliance policies** — token refresh from a non-enrolled host will be rejected.
 
@@ -278,7 +334,7 @@ Subsequent runs / token expiry
   └─► CA compliance evaluated against the container → may fail
 
 401 from Graph API
-  └─► Interceptor forces token refresh, retries request once
+  └─► Interceptor retries once with fresh token, then throws error
 ```
 
 The refresh token typically lasts **90 days**. If it expires, the device code prompt appears again on next start.
@@ -686,11 +742,12 @@ docker pull ghcr.io/DustHoff/msgraphmcp:latest
 
 ## Security Notes
 
-- **Token cache** (`tokens.json`) contains a refresh token (device code mode only). Written with `mode 0o600`; mount as a restricted Docker volume; do not bake into images.
+- **Token cache** (`tokens.json`) contains refresh tokens (delegated modes only). Written with `mode 0o600`; mount as a restricted Docker volume; do not bake into images.
 - The image runs as the **non-root `node` user** (see `Dockerfile`).
 - **Secrets** (`AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, certificate thumbprint) — use Kubernetes Secrets or an external vault; never commit real values to the repository.
-- **Prefer client certificate over client secret** for production — certificates are not transmitted over the wire and can be rotated without application downtime.
-- **Conditional Access:** Device code token refresh from a non-enrolled container will be rejected by device-compliance CA policies. Use client secret or certificate auth (Modes A/B) to avoid this.
-- Scope down `GRAPH_SCOPES` (device code mode) or grant only the required application permissions (app-only mode) for your use case.
-- `wipe_managed_device` is irreversible — consider creating a wrapper prompt or requiring explicit confirmation in your workflows.
+- **Prefer authorization code (Mode A) over device code (Mode D)** for HTTP deployments — tokens are tied to the user's browser device so CA compliance is evaluated correctly. Device code refresh from a non-enrolled container is rejected by device-compliance CA policies.
+- **Prefer client certificate (Mode C) over client secret (Mode B)** for app-only deployments — certificates are not transmitted over the wire and can be rotated without application downtime.
+- **Authorization code flow:** the `/auth/login` and `/auth/callback` endpoints must be reachable by the authenticating browser but do not need to be internet-facing — internal DNS is sufficient.
+- Scope down `GRAPH_SCOPES` (delegated modes) or grant only the required permissions (app-only modes) for your use case.
+- `wipe_managed_device` is irreversible — consider requiring explicit confirmation in your workflows.
 - See [`SECURITY-NOTICE.md`](SECURITY-NOTICE.md) for the full security assessment including dependency risk analysis.
