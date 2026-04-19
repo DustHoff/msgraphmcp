@@ -69,16 +69,33 @@ spec:
                 secretKeyRef:
                   name: msgraphmcp-azure
                   key: AZURE_TENANT_ID
-            # Uncomment if using a confidential app registration:
+            # ── Auth mode: uncomment ONE of the blocks below ────────────────
+            #
+            # Option A — Client Secret
             # - name: AZURE_CLIENT_SECRET
             #   valueFrom:
             #     secretKeyRef:
             #       name: msgraphmcp-azure
             #       key: AZURE_CLIENT_SECRET
+            #
+            # Option B — Client Certificate (recommended — avoids CA device-compliance issues)
+            # Step 1: store the SHA-256 thumbprint in the Secret (secret.yaml)
+            # Step 2: mount the PEM private key as a file (see volumes below)
+            # - name: AZURE_CLIENT_CERTIFICATE_PATH
+            #   value: /mnt/cert/tls.key
+            # - name: AZURE_CLIENT_CERTIFICATE_THUMBPRINT
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: msgraphmcp-azure
+            #       key: AZURE_CLIENT_CERTIFICATE_THUMBPRINT
 
           volumeMounts:
             - name: token-cache
               mountPath: /data
+            # Uncomment for Option B (client certificate):
+            # - name: client-cert
+            #   mountPath: /mnt/cert
+            #   readOnly: true
 
           resources:
             requests:
@@ -126,5 +143,12 @@ spec:
         - name: token-cache
           persistentVolumeClaim:
             claimName: msgraphmcp-token-cache
+        # Uncomment for Option B (client certificate).
+        # Create a Kubernetes Secret named "msgraphmcp-client-cert" containing
+        # the PEM private key under the key "tls.key", then uncomment below:
+        # - name: client-cert
+        #   secret:
+        #     secretName: msgraphmcp-client-cert
+        #     defaultMode: 0400
 
       restartPolicy: Always
