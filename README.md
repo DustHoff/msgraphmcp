@@ -4,7 +4,7 @@
 [![Docker](https://github.com/DustHoff/msgraphmcp/actions/workflows/docker.yml/badge.svg)](https://github.com/DustHoff/msgraphmcp/actions/workflows/docker.yml)
 [![GHCR](https://img.shields.io/badge/ghcr.io-msgraphmcp-blue?logo=github)](https://github.com/DustHoff/msgraphmcp/pkgs/container/msgraphmcp)
 
-**MCP Server for the Microsoft Graph API** — runs as a container, authenticates via delegated permissions (device code flow + automatic token refresh), and exposes **115+ tools** across all major Microsoft 365 workloads to any MCP-compatible client such as [Claude Code](https://claude.ai/code).
+**MCP Server for the Microsoft Graph API** — runs as a container, exposes **115+ tools** across all major Microsoft 365 workloads to any MCP-compatible client such as [Claude Code](https://claude.ai/code), and supports three authentication modes: **client secret**, **client certificate** (recommended for Kubernetes), and **device code** (interactive, local use).
 
 ---
 
@@ -44,10 +44,10 @@
 
 ```
 Claude Code (MCP client)
-       │  stdio
+       │  stdio / HTTP
        ▼
   msgraphmcp (Node.js / TypeScript)
-  ├── auth/TokenManager     MSAL device code flow + silent refresh
+  ├── auth/TokenManager     Three auth modes (see below)
   ├── graph/GraphClient     Axios wrapper, auto-pagination, retry on 401
   └── tools/
       ├── users · mail · calendar · files · groups
@@ -79,9 +79,13 @@ Token cache is persisted to disk (`/data/tokens.json` in the container) and moun
 1. Open [Azure Portal → App registrations](https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade) → **New registration**.
 2. **Name**: `msgraphmcp` (or any name)
 3. **Supported account types**: *Accounts in this organizational directory only* (or *multitenant* if needed)
-4. **Redirect URI**: select **Mobile and desktop applications** → `https://login.microsoftonline.com/common/oauth2/nativeclient`
+4. **Redirect URI** *(device code flow only)*: select **Mobile and desktop applications** → `https://login.microsoftonline.com/common/oauth2/nativeclient`
 5. Click **Register** — copy the **Application (client) ID** and **Directory (tenant) ID**.
-6. Go to **API Permissions → Add a permission → Microsoft Graph → Delegated permissions** and add:
+6. **Add permissions** — the type depends on the auth mode you choose:
+
+   - **Device code flow (delegated):** Go to **API Permissions → Add a permission → Microsoft Graph → Delegated permissions** and add the permissions below, then click **Grant admin consent**.
+   - **Client secret / certificate (app-only):** Go to **API Permissions → Add a permission → Microsoft Graph → Application permissions** and add the same permissions, then click **Grant admin consent**.  
+     > With app-only auth, `userId: "me"` does not resolve — use explicit UPNs or object IDs in all tool calls.
 
 | Permission | Purpose |
 |---|---|
@@ -207,13 +211,62 @@ Restart Claude Code after editing the config — the server appears in the MCP t
 |---|---|---|---|
 | `AZURE_CLIENT_ID` | **Yes** | — | App Registration client ID |
 | `AZURE_TENANT_ID` | No | `common` | Tenant ID or `common` for multi-tenant |
-| `AZURE_CLIENT_SECRET` | No | — | Client secret (optional, used if the app registration is a confidential client) |
-| `GRAPH_SCOPES` | No | all scopes | Space-separated list of Graph scopes to request |
+| `AZURE_CLIENT_SECRET` | No | — | **Auth mode A** — client secret; enables app-only (client credentials) flow |
+| `AZURE_CLIENT_CERTIFICATE_PATH` | No | — | **Auth mode B** — path to a PEM private key file; must be set together with `THUMBPRINT` |
+| `AZURE_CLIENT_CERTIFICATE_THUMBPRINT` | No | — | **Auth mode B** — SHA-256 certificate thumbprint (64 hex chars) from the App Registration |
+| `GRAPH_SCOPES` | No | all scopes | Space-separated delegated scopes (only used in device code mode) |
 | `TOKEN_CACHE_PATH` | No | `/data/tokens.json` | Path to the MSAL token cache file |
+| `PORT` | No | — | When set, the server listens on HTTP (Kubernetes mode); otherwise uses stdio |
+| `LOG_LEVEL` | No | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
 
 ---
 
 ## Authentication Flow
+
+Three modes are selected automatically by which environment variables are set:
+
+### Mode A — Client Secret (app-only)
+
+Set `AZURE_CLIENT_SECRET`. Recommended for automated / server deployments without Conditional Access issues.
+
+```
+Every request
+  └─► acquireTokenByClientCredential({ scopes: ['.default'] })
+  └─► Entra ID returns a short-lived access token (no refresh token stored)
+  └─► Device compliance CA policies are NOT evaluated — safe in containers
+```
+
+### Mode B — Client Certificate (app-only, recommended for Kubernetes)
+
+Set `AZURE_CLIENT_CERTIFICATE_PATH` + `AZURE_CLIENT_CERTIFICATE_THUMBPRINT`. Same flow as Mode A but uses a certificate assertion instead of a shared secret — no secret rotation required.
+
+```
+Every request
+  └─► acquireTokenByClientCredential with cert assertion
+  └─► Entra ID returns a short-lived access token
+  └─► Device compliance CA policies are NOT evaluated
+```
+
+**Kubernetes setup:**
+
+```bash
+# 1. Generate a self-signed key + cert (or use your PKI)
+openssl req -x509 -newkey rsa:2048 -keyout tls.key -out tls.crt -days 365 -nodes -subj "/CN=msgraphmcp"
+
+# 2. Get the SHA-256 thumbprint (64 hex chars)
+openssl x509 -in tls.crt -fingerprint -sha256 -noout | tr -d ':' | sed 's/.*=//'
+
+# 3. Upload tls.crt to the App Registration → Certificates & secrets → Certificates
+
+# 4. Store the private key as a Kubernetes Secret
+kubectl create secret generic msgraphmcp-client-cert --from-file=tls.key -n msgraphmcp
+```
+
+Then uncomment the `client-cert` volume in `k8s/deployment.yaml` and set `AZURE_CLIENT_CERTIFICATE_THUMBPRINT` in `k8s/secret.yaml`.
+
+### Mode C — Device Code (delegated, local / interactive)
+
+No secret or certificate configured. Suitable for local use and Claude Code stdio integration. **Not recommended in containers under Entra ID Conditional Access device-compliance policies** — token refresh from a non-enrolled host will be rejected.
 
 ```
 First run
@@ -222,13 +275,13 @@ First run
 
 Subsequent runs / token expiry
   └─► acquireTokenSilent() uses cached refresh token
-  └─► Access token auto-refreshed; no user interaction needed
+  └─► CA compliance evaluated against the container → may fail
 
 401 from Graph API
   └─► Interceptor forces token refresh, retries request once
 ```
 
-The refresh token typically lasts **90 days** (configurable in your Azure AD tenant). If it expires, the device code prompt will appear again on next start.
+The refresh token typically lasts **90 days**. If it expires, the device code prompt appears again on next start.
 
 ---
 
@@ -633,8 +686,11 @@ docker pull ghcr.io/DustHoff/msgraphmcp:latest
 
 ## Security Notes
 
-- **Token cache** (`tokens.json`) contains a refresh token. Mount it as a restricted Docker volume; do not bake it into images.
+- **Token cache** (`tokens.json`) contains a refresh token (device code mode only). Written with `mode 0o600`; mount as a restricted Docker volume; do not bake into images.
 - The image runs as the **non-root `node` user** (see `Dockerfile`).
-- Secrets (`AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`) are passed as environment variables — use Docker secrets or your CI secrets store; never commit them to the repository.
-- Scope down `GRAPH_SCOPES` to the minimum required for your use case.
+- **Secrets** (`AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, certificate thumbprint) — use Kubernetes Secrets or an external vault; never commit real values to the repository.
+- **Prefer client certificate over client secret** for production — certificates are not transmitted over the wire and can be rotated without application downtime.
+- **Conditional Access:** Device code token refresh from a non-enrolled container will be rejected by device-compliance CA policies. Use client secret or certificate auth (Modes A/B) to avoid this.
+- Scope down `GRAPH_SCOPES` (device code mode) or grant only the required application permissions (app-only mode) for your use case.
 - `wipe_managed_device` is irreversible — consider creating a wrapper prompt or requiring explicit confirmation in your workflows.
+- See [`SECURITY-NOTICE.md`](SECURITY-NOTICE.md) for the full security assessment including dependency risk analysis.
