@@ -1,0 +1,21 @@
+services:
+  msgraphmcp:
+    build: .
+    image: msgraphmcp:latest
+    stdin_open: true   # required for MCP stdio transport
+    tty: false
+    volumes:
+      - token-cache:/data
+    environment:
+      # Required
+      - AZURE_CLIENT_ID=${AZURE_CLIENT_ID}
+      - AZURE_TENANT_ID=${AZURE_TENANT_ID}
+      # Optional – only needed if the app registration requires a client secret
+      - AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET:-}
+      # Comma-separated scopes override
+      - GRAPH_SCOPES=${GRAPH_SCOPES:-}
+      - TOKEN_CACHE_PATH=/data/tokens.json
+
+volumes:
+  token-cache:
+    driver: local

@@ -1,0 +1,25 @@
+# Dev artifacts
+node_modules/
+dist/
+coverage/
+*.log
+*.tsbuildinfo
+
+# Git & CI
+.git/
+.gitignore
+.github/
+
+# Editor / OS
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+
+# Secrets (never bake these into the image)
+.env
+.env.*
+!.env.example
+
+# Claude Code workspace files
+.claude/

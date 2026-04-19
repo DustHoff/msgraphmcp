@@ -1,0 +1,23 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Token cache — never commit
+data/
+tokens.json
+*.tokens.json
+
+# Secrets
+.env
+.env.local
+
+# Editor / OS
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+
+# Claude Code workspace
+.claude/
+.mcp.json
