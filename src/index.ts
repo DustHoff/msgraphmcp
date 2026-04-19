@@ -10,10 +10,22 @@ import { logger } from './logger';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+// Guard against request bodies that could cause OOM before JSON parsing
+const MAX_BODY_BYTES = 4 * 1024 * 1024; // 4 MB — ample for any MCP JSON-RPC message
+
 function parseBody(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    let bytesReceived = 0;
+
+    req.on('data', (chunk: Buffer) => {
+      bytesReceived += chunk.length;
+      if (bytesReceived > MAX_BODY_BYTES) {
+        req.destroy(new Error('Request body exceeds 4 MB limit'));
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on('end', () => {
       const raw = Buffer.concat(chunks).toString('utf8');
       try {

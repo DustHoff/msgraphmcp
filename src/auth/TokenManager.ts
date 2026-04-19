@@ -55,7 +55,8 @@ function createCachePlugin(): ICachePlugin {
         if (!fs.existsSync(dir)) {
           fs.mkdirSync(dir, { recursive: true });
         }
-        fs.writeFileSync(cachePath, ctx.tokenCache.serialize());
+        // mode 0o600: only the owning process user may read/write the token cache
+        fs.writeFileSync(cachePath, ctx.tokenCache.serialize(), { mode: 0o600 });
       }
     },
   };
