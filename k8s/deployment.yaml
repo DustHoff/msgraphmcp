@@ -71,14 +71,26 @@ spec:
                   key: AZURE_TENANT_ID
             # ── Auth mode: uncomment ONE of the blocks below ────────────────
             #
-            # Option A — Client Secret
+            # Option A — Authorization Code + PKCE (delegated, recommended for HTTP mode)
+            # Requires: AZURE_CLIENT_SECRET + AZURE_REDIRECT_URI.
+            # Register https://<your-host>/auth/callback as a redirect URI in Entra ID.
+            # After deploying, visit https://<your-host>/auth/login to authenticate.
+            # - name: AZURE_CLIENT_SECRET
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: msgraphmcp-azure
+            #       key: AZURE_CLIENT_SECRET
+            # - name: AZURE_REDIRECT_URI
+            #   value: https://msgraph.os.hoffnet.onesi.de/auth/callback
+            #
+            # Option B — Client Secret / app-only (no user context, needs Application permissions)
             # - name: AZURE_CLIENT_SECRET
             #   valueFrom:
             #     secretKeyRef:
             #       name: msgraphmcp-azure
             #       key: AZURE_CLIENT_SECRET
             #
-            # Option B — Client Certificate (recommended — avoids CA device-compliance issues)
+            # Option C — Client Certificate (app-only, preferred for production)
             # Step 1: store the SHA-256 thumbprint in the Secret (secret.yaml)
             # Step 2: mount the PEM private key as a file (see volumes below)
             # - name: AZURE_CLIENT_CERTIFICATE_PATH

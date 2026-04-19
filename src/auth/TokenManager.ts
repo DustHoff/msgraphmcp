@@ -35,7 +35,7 @@ const DEFAULT_SCOPES = [
   'offline_access',
 ];
 
-// Scopes for delegated (device code) flow — overridable via GRAPH_SCOPES env var.
+// Scopes for delegated (device code / auth code) flow — overridable via GRAPH_SCOPES env var.
 export const SCOPES: string[] = process.env.GRAPH_SCOPES
   ? process.env.GRAPH_SCOPES.split(' ').filter(Boolean)
   : DEFAULT_SCOPES;
@@ -70,28 +70,37 @@ function createCachePlugin(): ICachePlugin {
 
 // ── Auth mode detection ────────────────────────────────────────────────────────
 //
-// The server supports three authentication modes selected by environment variables:
+// The server supports four authentication modes selected by environment variables:
 //
-// 1. Client Secret (confidential client, app-only)
-//    Set: AZURE_CLIENT_SECRET
+// 1. Authorization Code (confidential client, delegated — recommended for HTTP mode)
+//    Set: AZURE_CLIENT_SECRET + AZURE_REDIRECT_URI
+//    Flow: OAuth 2.0 Authorization Code + PKCE → user authenticates in browser
+//    Visit /auth/login to start the flow. Redirect URI must be registered in Entra.
+//    CA compliance: evaluated against the USER'S browser device.
+//
+// 2. Client Secret (confidential client, app-only)
+//    Set: AZURE_CLIENT_SECRET (without AZURE_REDIRECT_URI)
 //    Flow: client_credentials → acquireTokenByClientCredential()
-//    CA compliance: not evaluated (no user session, no device check)
+//    Requires Application permissions (not delegated) + admin consent.
 //
-// 2. Client Certificate (confidential client, app-only, preferred for K8s)
-//    Set: AZURE_CLIENT_CERTIFICATE_PATH  (path to PEM private key)
-//         AZURE_CLIENT_CERTIFICATE_THUMBPRINT  (hex SHA-256 fingerprint, 64 chars)
-//    Flow: client_credentials with cert assertion → acquireTokenByClientCredential()
-//    CA compliance: not evaluated
+// 3. Client Certificate (confidential client, app-only, preferred for K8s)
+//    Set: AZURE_CLIENT_CERTIFICATE_PATH + AZURE_CLIENT_CERTIFICATE_THUMBPRINT
+//    Flow: client_credentials with cert assertion
+//    Requires Application permissions + admin consent.
 //
-// 3. Device Code (public client, delegated — local / stdio use only)
+// 4. Device Code (public client, delegated — local / stdio use only)
 //    Set: none of the above
 //    Flow: device_code → user authenticates in browser → acquireTokenByDeviceCode()
-//    CA compliance: evaluated against the USER'S browser device on first auth;
-//                   token refresh from the container may be rejected if Entra ID
-//                   CA policies require device compliance on the refreshing device.
-//                   Do NOT use in containers if CA compliance policies are active.
+//    Not suitable for containers if CA compliance policies are active.
 
-export type AuthMode = 'client-secret' | 'client-certificate' | 'device-code';
+export type AuthMode = 'authorization-code' | 'client-secret' | 'client-certificate' | 'device-code';
+
+export class AuthRequiredError extends Error {
+  constructor(message = 'Not authenticated — visit /auth/login to sign in with Microsoft') {
+    super(message);
+    this.name = 'AuthRequiredError';
+  }
+}
 
 export interface TokenManagerOptions {
   /** When false, tokens are kept in-memory only (no file I/O). Use for per-session isolation. */
@@ -110,6 +119,7 @@ export class TokenManager {
     const clientSecret = process.env.AZURE_CLIENT_SECRET;
     const certPath = process.env.AZURE_CLIENT_CERTIFICATE_PATH;
     const certThumbprint = process.env.AZURE_CLIENT_CERTIFICATE_THUMBPRINT;
+    const redirectUri = process.env.AZURE_REDIRECT_URI;
 
     if (!clientId) throw new Error('AZURE_CLIENT_ID environment variable is required');
 
@@ -137,12 +147,19 @@ export class TokenManager {
       );
     }
 
+    // Authorization code flow takes priority over client credentials when AZURE_REDIRECT_URI is set.
     this.isConfidential = Boolean(clientSecret || clientCertificate);
-    this.authMode = clientCertificate
-      ? 'client-certificate'
-      : clientSecret
-        ? 'client-secret'
-        : 'device-code';
+    this.authMode = redirectUri && clientSecret
+      ? 'authorization-code'
+      : clientCertificate
+        ? 'client-certificate'
+        : clientSecret
+          ? 'client-secret'
+          : 'device-code';
+
+    if (this.authMode === 'authorization-code' && !clientSecret) {
+      throw new Error('AZURE_CLIENT_SECRET is required for authorization-code flow');
+    }
 
     const msalConfig: Configuration = {
       auth: {
@@ -167,18 +184,31 @@ export class TokenManager {
   }
 
   async getAccessToken(): Promise<string> {
+    // ── Authorization Code flow ─────────────────────────────────────────────
+    // Triggered when AZURE_REDIRECT_URI + AZURE_CLIENT_SECRET are both set.
+    // Tokens are acquired interactively via the browser at /auth/login and cached.
+    // After initial login, subsequent calls use silent refresh.
+    if (this.authMode === 'authorization-code') {
+      const account = await this.getAccount();
+      if (account) {
+        try {
+          const cca = this.app as ConfidentialClientApplication;
+          const result = await cca.acquireTokenSilent({ account, scopes: SCOPES });
+          if (result?.accessToken) return result.accessToken;
+        } catch {
+          // refresh failed — fall through to AuthRequiredError
+        }
+      }
+      throw new AuthRequiredError();
+    }
+
     // ── App-only (client credentials) flow ─────────────────────────────────
-    // Triggered when AZURE_CLIENT_SECRET or AZURE_CLIENT_CERTIFICATE_PATH is set.
+    // Triggered when AZURE_CLIENT_SECRET or AZURE_CLIENT_CERTIFICATE_PATH is set
+    // (without AZURE_REDIRECT_URI).
     //
-    // This flow does not involve a user session. Entra ID Conditional Access
-    // policies that require device compliance or MFA are NOT applied to the
-    // calling device (the container). Safe to use from non-Entra-enrolled hosts.
-    //
-    // Requirements on the App Registration:
-    //   • Application permissions (not delegated) must be granted and admin-consented.
-    //   • Tool parameters like userId='me' will not resolve — use explicit UPNs or
-    //     object IDs instead.
-    if (this.isConfidential) {
+    // Requires Application permissions + admin consent on the app registration.
+    // Tool parameters like userId='me' will not resolve — use explicit UPNs/object IDs.
+    if (this.authMode === 'client-secret' || this.authMode === 'client-certificate') {
       const cca = this.app as ConfidentialClientApplication;
       const result = await cca.acquireTokenByClientCredential({
         scopes: APP_ONLY_SCOPES,
@@ -194,7 +224,6 @@ export class TokenManager {
     // CA compliance warning: token refresh requests are issued from this process.
     // If Entra ID CA policies require device compliance on the refreshing device,
     // and this process runs on a non-enrolled container, silent refresh WILL fail.
-    // Switching to client credentials auth (above) resolves this.
     const account = await this.getAccount();
 
     if (account) {
@@ -221,5 +250,43 @@ export class TokenManager {
 
     if (!result?.accessToken) throw new Error('Authentication failed: no access token returned');
     return result.accessToken;
+  }
+
+  // ── Authorization Code helpers ──────────────────────────────────────────────
+
+  /** Generates the Microsoft login URL for the OAuth authorization code flow. */
+  async getAuthCodeUrl(redirectUri: string, state: string, codeChallenge: string): Promise<string> {
+    if (this.authMode !== 'authorization-code') {
+      throw new Error('getAuthCodeUrl is only available in authorization-code mode');
+    }
+    const cca = this.app as ConfidentialClientApplication;
+    return cca.getAuthCodeUrl({
+      scopes: SCOPES,
+      redirectUri,
+      state,
+      codeChallenge,
+      codeChallengeMethod: 'S256',
+    });
+  }
+
+  /** Exchanges an authorization code (from /auth/callback) for tokens. */
+  async acquireTokenByAuthCode(
+    code: string,
+    redirectUri: string,
+    codeVerifier: string
+  ): Promise<void> {
+    if (this.authMode !== 'authorization-code') {
+      throw new Error('acquireTokenByAuthCode is only available in authorization-code mode');
+    }
+    const cca = this.app as ConfidentialClientApplication;
+    const result = await cca.acquireTokenByCode({ code, scopes: SCOPES, redirectUri, codeVerifier });
+    if (!result?.accessToken) throw new Error('Authorization code exchange returned no access token');
+  }
+
+  /** Returns true if a valid cached account exists (delegated flows only). */
+  async isAuthenticated(): Promise<boolean> {
+    if (this.authMode === 'client-secret' || this.authMode === 'client-certificate') return true;
+    const account = await this.getAccount();
+    return account !== null;
   }
 }

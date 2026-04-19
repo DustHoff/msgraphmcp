@@ -7,6 +7,7 @@ const GRAPH_BASE = 'https://graph.microsoft.com/v1.0';
 // Extend InternalAxiosRequestConfig to carry request start time for duration logging
 interface TimedRequestConfig extends InternalAxiosRequestConfig {
   _startMs?: number;
+  _retried?: boolean;
 }
 
 export class GraphClient {
@@ -45,7 +46,7 @@ export class GraphClient {
         const status: number | undefined = error.response?.status;
         const msg: string = error.response?.data?.error?.message || error.message;
 
-        if (status === 401) {
+        if (status === 401 && !cfg?._retried) {
           logger.warn('graph 401 — retrying with fresh token', {
             method: cfg?.method?.toUpperCase(),
             url: cfg?.url,
@@ -53,6 +54,7 @@ export class GraphClient {
           });
           const token = await this.tokenManager.getAccessToken();
           error.config.headers.Authorization = `Bearer ${token}`;
+          error.config._retried = true;
           return this.http.request(error.config);
         }
 
