@@ -93,12 +93,18 @@ function createCachePlugin(): ICachePlugin {
 
 export type AuthMode = 'client-secret' | 'client-certificate' | 'device-code';
 
+export interface TokenManagerOptions {
+  /** When false, tokens are kept in-memory only (no file I/O). Use for per-session isolation. */
+  persistCache?: boolean;
+}
+
 export class TokenManager {
   private app: PublicClientApplication | ConfidentialClientApplication;
   private isConfidential: boolean;
   readonly authMode: AuthMode;
 
-  constructor() {
+  constructor(options: TokenManagerOptions = {}) {
+    const { persistCache = true } = options;
     const clientId = process.env.AZURE_CLIENT_ID;
     const tenantId = process.env.AZURE_TENANT_ID || 'common';
     const clientSecret = process.env.AZURE_CLIENT_SECRET;
@@ -145,7 +151,7 @@ export class TokenManager {
         ...(clientSecret ? { clientSecret } : {}),
         ...(clientCertificate ? { clientCertificate } : {}),
       },
-      cache: { cachePlugin: createCachePlugin() },
+      cache: persistCache ? { cachePlugin: createCachePlugin() } : {},
       system: { loggerOptions: { loggerCallback: () => {}, piiLoggingEnabled: false } },
     };
 

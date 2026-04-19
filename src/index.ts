@@ -64,13 +64,10 @@ async function startStdio(graphClient: GraphClient, tokenManager: TokenManager):
 
 // ── HTTP / Streamable-HTTP mode (Kubernetes) ──────────────────────────────────
 
-async function startHttp(graphClient: GraphClient, tokenManager: TokenManager, port: number): Promise<void> {
-  // Warm-up auth once at startup so the first request doesn't stall on device-code flow
-  logger.info('authenticating with microsoft graph');
-  await tokenManager.getAccessToken();
-  logger.info('authentication successful — http mcp server ready', { port });
-
+async function startHttp(port: number): Promise<void> {
   // Map of active sessions: sessionId → transport
+  // Each session owns its own TokenManager + GraphClient so delegated tokens
+  // are never shared across users.
   const sessions = new Map<string, StreamableHTTPServerTransport>();
 
   const httpServer = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
@@ -94,7 +91,11 @@ async function startHttp(graphClient: GraphClient, tokenManager: TokenManager, p
       let transport = incomingSessionId ? sessions.get(incomingSessionId) : undefined;
 
       if (!transport) {
-        // New session: create a dedicated transport + server instance
+        // New session: isolated TokenManager (in-memory cache) + GraphClient so
+        // that User A's tokens can never bleed into User B's session.
+        const sessionTokenManager = new TokenManager({ persistCache: false });
+        const sessionGraphClient = new GraphClient(sessionTokenManager);
+
         let resolveSessionId: (id: string) => void;
         const sessionIdPromise = new Promise<string>((r) => { resolveSessionId = r; });
 
@@ -111,7 +112,7 @@ async function startHttp(graphClient: GraphClient, tokenManager: TokenManager, p
           },
         });
 
-        const mcpServer = createMcpServer(graphClient);
+        const mcpServer = createMcpServer(sessionGraphClient);
         mcpServer.server.oninitialized = () => {
           const ci = mcpServer.server.getClientVersion();
           sessionIdPromise.then((sid) => {
@@ -158,9 +159,6 @@ async function main(): Promise<void> {
     }
   }
 
-  const tokenManager = new TokenManager();
-  const graphClient = new GraphClient(tokenManager);
-
   const portEnv = process.env.PORT;
   if (portEnv) {
     const port = parseInt(portEnv, 10);
@@ -168,8 +166,10 @@ async function main(): Promise<void> {
       process.stderr.write(`ERROR: PORT must be a valid port number, got: ${portEnv}\n`);
       process.exit(1);
     }
-    await startHttp(graphClient, tokenManager, port);
+    await startHttp(port);
   } else {
+    const tokenManager = new TokenManager();
+    const graphClient = new GraphClient(tokenManager);
     await startStdio(graphClient, tokenManager);
   }
 }
