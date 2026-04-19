@@ -1,0 +1,130 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: msgraphmcp
+  namespace: msgraphmcp
+  labels:
+    app.kubernetes.io/name: msgraphmcp
+    app.kubernetes.io/version: "1.0.0"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: msgraphmcp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: msgraphmcp
+        app.kubernetes.io/version: "1.0.0"
+    spec:
+      # ── ARM64 node placement ──────────────────────────────────────────────
+      nodeSelector:
+        kubernetes.io/arch: arm64
+
+      # If your arm64 nodes carry a dedicated taint, add a matching toleration.
+      # Common examples (uncomment the one that matches your cluster):
+      tolerations:
+        - key: "kubernetes.io/arch"
+          operator: "Equal"
+          value: "arm64"
+          effect: "NoSchedule"
+        # - key: "node-role.kubernetes.io/arm"
+        #   operator: "Exists"
+        #   effect: "NoSchedule"
+
+      # ── Security ──────────────────────────────────────────────────────────
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000        # matches the `node` user in node:20-alpine
+        runAsGroup: 1000
+        fsGroup: 1000
+
+      containers:
+        - name: msgraphmcp
+          image: ghcr.io/dusthoff/msgraphmcp:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+
+          env:
+            # Enable HTTP transport (Kubernetes mode)
+            - name: PORT
+              value: "8080"
+            - name: TOKEN_CACHE_PATH
+              value: /data/tokens.json
+            - name: NODE_ENV
+              value: production
+            - name: LOG_LEVEL
+              value: info
+            # Azure credentials from Secret
+            - name: AZURE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: msgraphmcp-azure
+                  key: AZURE_CLIENT_ID
+            - name: AZURE_TENANT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: msgraphmcp-azure
+                  key: AZURE_TENANT_ID
+            # Uncomment if using a confidential app registration:
+            # - name: AZURE_CLIENT_SECRET
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: msgraphmcp-azure
+            #       key: AZURE_CLIENT_SECRET
+
+          volumeMounts:
+            - name: token-cache
+              mountPath: /data
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+          # ── Probes ─────────────────────────────────────────────────────────
+          # start-period covers the one-time device-code authentication flow
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            failureThreshold: 60    # 60 × 5 s = 5 min for first auth
+            periodSeconds: 5
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false  # false because npm writes to node_modules at runtime
+            capabilities:
+              drop:
+                - ALL
+
+      volumes:
+        - name: token-cache
+          persistentVolumeClaim:
+            claimName: msgraphmcp-token-cache
+
+      restartPolicy: Always

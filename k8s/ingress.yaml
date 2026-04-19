@@ -1,0 +1,39 @@
+# Internal-network Ingress for msgraphmcp
+#
+# Prerequisites:
+#   - An Ingress controller installed (nginx-ingress, traefik, …)
+#   - Replace the hostname below with one that resolves in your internal DNS
+#
+# Apply with:
+#   kubectl apply -f k8s/ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: msgraphmcp
+  namespace: msgraphmcp
+  labels:
+    app.kubernetes.io/name: msgraphmcp
+  annotations:
+    # Keep long-lived SSE connections open (GET /mcp streams)
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # Disable buffering so SSE events are forwarded immediately
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    # Restrict access to internal networks only
+    nginx.ingress.kubernetes.io/whitelist-source-range: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+spec:
+  # Set ingressClassName to match your cluster's Ingress controller.
+  # Common values: nginx, traefik, kong
+  ingressClassName: nginx
+  rules:
+    - host: msgraphmcp.internal    # Replace with your internal DNS hostname
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: msgraphmcp
+                port:
+                  name: http

@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: msgraphmcp-token-cache
+  namespace: msgraphmcp
+  labels:
+    app.kubernetes.io/name: msgraphmcp
+    app.kubernetes.io/component: storage
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Mi
+  # Omit storageClassName to use the cluster default.
+  # Set explicitly if needed, e.g.:
+  # storageClassName: local-path
