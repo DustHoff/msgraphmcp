@@ -3,6 +3,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { TokenManager } from './auth/TokenManager';
 import { GraphClient } from './graph/GraphClient';
 import { registerAllTools } from './tools/index';
+import { logger } from './logger';
 
 async function main() {
   const requiredEnv = ['AZURE_CLIENT_ID'];
@@ -21,17 +22,25 @@ async function main() {
     version: '1.0.0',
   });
 
+  // Log client name + version as soon as the MCP handshake completes
+  server.server.oninitialized = () => {
+    const clientInfo = server.server.getClientVersion();
+    const capabilities = server.server.getClientCapabilities();
+    logger.info('mcp client connected', {
+      client: clientInfo?.name,
+      clientVersion: clientInfo?.version,
+      experimental: capabilities?.experimental,
+    });
+  };
+
   registerAllTools(server, graphClient);
 
-  // Warm up authentication before accepting MCP requests.
-  // The device code prompt is written to stderr and does not interfere with
-  // the MCP stdio protocol running on stdout/stdin.
-  process.stderr.write('Initializing Microsoft Graph authentication...\n');
+  logger.info('authenticating with microsoft graph');
   try {
     await tokenManager.getAccessToken();
-    process.stderr.write('Authentication successful. MCP server ready.\n');
+    logger.info('authentication successful — mcp server ready');
   } catch (err) {
-    process.stderr.write(`Authentication failed: ${err}\n`);
+    logger.error('authentication failed', { error: String(err) });
     process.exit(1);
   }
 
@@ -40,6 +49,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  process.stderr.write(`Fatal error: ${err}\n`);
+  logger.error('fatal error', { error: String(err) });
   process.exit(1);
 });

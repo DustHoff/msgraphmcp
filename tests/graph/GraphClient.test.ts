@@ -4,6 +4,9 @@ import { TokenManager } from '../../src/auth/TokenManager';
 
 jest.mock('axios');
 jest.mock('../../src/auth/TokenManager');
+jest.mock('../../src/logger', () => ({
+  logger: { debug: jest.fn(), info: jest.fn(), warn: jest.fn(), error: jest.fn() },
+}));
 
 const mockedAxios = jest.mocked(axios);
 
@@ -14,10 +17,12 @@ describe('GraphClient', () => {
     patch: jest.Mock;
     put: jest.Mock;
     delete: jest.Mock;
+    request: jest.Mock;
     interceptors: { request: { use: jest.Mock }; response: { use: jest.Mock } };
   };
   let client: GraphClient;
   let requestInterceptor: (config: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  let responseSuccessInterceptor: (res: Record<string, unknown>) => Record<string, unknown>;
   let responseErrorInterceptor: (error: unknown) => Promise<unknown>;
 
   beforeEach(() => {
@@ -27,6 +32,7 @@ describe('GraphClient', () => {
       patch: jest.fn(),
       put: jest.fn(),
       delete: jest.fn(),
+      request: jest.fn(),
       interceptors: {
         request: { use: jest.fn() },
         response: { use: jest.fn() },
@@ -40,10 +46,8 @@ describe('GraphClient', () => {
 
     client = new GraphClient(mockTokenManager);
 
-    // Capture interceptors to test them
     requestInterceptor = mockHttp.interceptors.request.use.mock.calls[0][0];
-    const [, onError] = mockHttp.interceptors.response.use.mock.calls[0];
-    responseErrorInterceptor = onError;
+    [responseSuccessInterceptor, responseErrorInterceptor] = mockHttp.interceptors.response.use.mock.calls[0];
   });
 
   afterEach(() => jest.clearAllMocks());
@@ -53,6 +57,23 @@ describe('GraphClient', () => {
       const config: Record<string, unknown> = { headers: {} };
       const result = await requestInterceptor(config);
       expect(result.headers).toMatchObject({ Authorization: 'Bearer test-bearer-token' });
+    });
+
+    it('stamps _startMs on the config', async () => {
+      const config: Record<string, unknown> = { headers: {} };
+      const before = Date.now();
+      const result = await requestInterceptor(config);
+      const after = Date.now();
+      expect(result._startMs).toBeGreaterThanOrEqual(before);
+      expect(result._startMs).toBeLessThanOrEqual(after);
+    });
+  });
+
+  describe('response success interceptor', () => {
+    it('passes the response through unchanged', () => {
+      const fakeRes = { config: { method: 'get', url: '/users', _startMs: Date.now() - 10 }, status: 200, data: { id: '1' } };
+      const result = responseSuccessInterceptor(fakeRes);
+      expect(result).toBe(fakeRes);
     });
   });
 
@@ -121,12 +142,26 @@ describe('GraphClient', () => {
         response: {
           status: 400,
           data: { error: { message: 'Invalid request' } },
-          config: {},
         },
-        config: { headers: {} },
+        config: { method: 'get', url: '/users', headers: {}, _startMs: Date.now() - 5 },
         message: 'Request failed',
       };
       await expect(responseErrorInterceptor(graphError)).rejects.toThrow('Graph API error 400: Invalid request');
+    });
+
+    it('retries once on 401 with a fresh token', async () => {
+      mockHttp.request.mockResolvedValue({ config: {}, status: 200, data: { ok: true } });
+
+      const unauthorizedError = {
+        response: { status: 401, data: {} },
+        config: { method: 'get', url: '/me', headers: {}, _startMs: Date.now() - 5 },
+        message: 'Unauthorized',
+      };
+
+      await responseErrorInterceptor(unauthorizedError);
+      expect(mockHttp.request).toHaveBeenCalled();
+      const calledConfig = mockHttp.request.mock.calls[0][0];
+      expect(calledConfig.headers.Authorization).toBe('Bearer test-bearer-token');
     });
   });
 });

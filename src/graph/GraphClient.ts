@@ -1,7 +1,13 @@
-import axios, { AxiosInstance, AxiosRequestConfig, AxiosResponse } from 'axios';
+import axios, { AxiosInstance, AxiosRequestConfig, AxiosResponse, InternalAxiosRequestConfig } from 'axios';
 import { TokenManager } from '../auth/TokenManager';
+import { logger } from '../logger';
 
 const GRAPH_BASE = 'https://graph.microsoft.com/v1.0';
+
+// Extend InternalAxiosRequestConfig to carry request start time for duration logging
+interface TimedRequestConfig extends InternalAxiosRequestConfig {
+  _startMs?: number;
+}
 
 export class GraphClient {
   private http: AxiosInstance;
@@ -11,24 +17,53 @@ export class GraphClient {
     this.tokenManager = tokenManager;
     this.http = axios.create({ baseURL: GRAPH_BASE });
 
-    this.http.interceptors.request.use(async (config) => {
+    // ── Auth interceptor ──────────────────────────────────────────────────────
+    this.http.interceptors.request.use(async (config: TimedRequestConfig) => {
       const token = await this.tokenManager.getAccessToken();
       config.headers.Authorization = `Bearer ${token}`;
       config.headers['Content-Type'] = 'application/json';
+      config._startMs = Date.now();
       return config;
     });
 
+    // ── Logging + success response ────────────────────────────────────────────
     this.http.interceptors.response.use(
-      (res) => res,
+      (res: AxiosResponse) => {
+        const cfg = res.config as TimedRequestConfig;
+        const duration = cfg._startMs !== undefined ? Date.now() - cfg._startMs : undefined;
+        logger.info('graph ok', {
+          method: cfg.method?.toUpperCase(),
+          url: cfg.url,
+          status: res.status,
+          ...(duration !== undefined && { durationMs: duration }),
+        });
+        return res;
+      },
       async (error) => {
-        if (error.response?.status === 401) {
-          // Force token refresh by retrying once
+        const cfg = error.config as TimedRequestConfig | undefined;
+        const duration = cfg?._startMs !== undefined ? Date.now() - cfg._startMs : undefined;
+        const status: number | undefined = error.response?.status;
+        const msg: string = error.response?.data?.error?.message || error.message;
+
+        if (status === 401) {
+          logger.warn('graph 401 — retrying with fresh token', {
+            method: cfg?.method?.toUpperCase(),
+            url: cfg?.url,
+            ...(duration !== undefined && { durationMs: duration }),
+          });
           const token = await this.tokenManager.getAccessToken();
           error.config.headers.Authorization = `Bearer ${token}`;
           return this.http.request(error.config);
         }
-        const msg = error.response?.data?.error?.message || error.message;
-        throw new Error(`Graph API error ${error.response?.status}: ${msg}`);
+
+        logger.error('graph error', {
+          method: cfg?.method?.toUpperCase(),
+          url: cfg?.url,
+          status,
+          message: msg,
+          ...(duration !== undefined && { durationMs: duration }),
+        });
+        throw new Error(`Graph API error ${status}: ${msg}`);
       }
     );
   }
@@ -47,7 +82,7 @@ export class GraphClient {
       const data: { value: T[]; '@odata.nextLink'?: string } = await this.get(nextUrl, queryParams);
       results.push(...(data.value ?? []));
       nextUrl = data['@odata.nextLink'];
-      queryParams = undefined; // nextLink already contains params
+      queryParams = undefined;
     }
 
     return results;
