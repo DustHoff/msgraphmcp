@@ -1,8 +1,8 @@
 # msgraphmcp
 
-[![CI](https://github.com/YOUR_ORG/msgraphmcp/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_ORG/msgraphmcp/actions/workflows/ci.yml)
-[![Docker](https://github.com/YOUR_ORG/msgraphmcp/actions/workflows/docker.yml/badge.svg)](https://github.com/YOUR_ORG/msgraphmcp/actions/workflows/docker.yml)
-[![GHCR](https://img.shields.io/badge/ghcr.io-msgraphmcp-blue?logo=github)](https://github.com/YOUR_ORG/msgraphmcp/pkgs/container/msgraphmcp)
+[![CI](https://github.com/DustHoff/msgraphmcp/actions/workflows/ci.yml/badge.svg)](https://github.com/DustHoff/msgraphmcp/actions/workflows/ci.yml)
+[![Docker](https://github.com/DustHoff/msgraphmcp/actions/workflows/docker.yml/badge.svg)](https://github.com/DustHoff/msgraphmcp/actions/workflows/docker.yml)
+[![GHCR](https://img.shields.io/badge/ghcr.io-msgraphmcp-blue?logo=github)](https://github.com/DustHoff/msgraphmcp/pkgs/container/msgraphmcp)
 
 **MCP Server for the Microsoft Graph API** — runs as a container, authenticates via delegated permissions (device code flow + automatic token refresh), and exposes **115+ tools** across all major Microsoft 365 workloads to any MCP-compatible client such as [Claude Code](https://claude.ai/code).
 
@@ -115,7 +115,7 @@ Token cache is persisted to disk (`/data/tokens.json` in the container) and moun
 ### Local (Node.js)
 
 ```bash
-git clone https://github.com/YOUR_ORG/msgraphmcp.git
+git clone https://github.com/DustHoff/msgraphmcp.git
 cd msgraphmcp
 npm install
 npm run build
@@ -190,7 +190,7 @@ Or using the pre-built Docker image from GHCR:
         "-v", "msgraphmcp-tokens:/data",
         "-e", "AZURE_CLIENT_ID=your-client-id",
         "-e", "AZURE_TENANT_ID=your-tenant-id",
-        "ghcr.io/YOUR_ORG/msgraphmcp:latest"
+        "ghcr.io/DustHoff/msgraphmcp:latest"
       ]
     }
   }
@@ -620,12 +620,12 @@ msgraphmcp/
 ### Pulling from GHCR
 
 ```bash
-docker pull ghcr.io/YOUR_ORG/msgraphmcp:latest
+docker pull ghcr.io/DustHoff/msgraphmcp:latest
 ```
 
 ### Setup in your repository
 
-1. **Replace `YOUR_ORG`** in the badge URLs above with your GitHub username or organisation.
+1. **Replace `DustHoff`** in the badge URLs above with your GitHub username or organisation.
 2. Push to a GitHub repository — Actions will run automatically.
 3. For private packages: go to **Settings → Packages → msgraphmcp → Package settings → Change visibility** if needed.
 
