@@ -1,7 +1,3 @@
-# syntax=docker/dockerfile:1
-# TOKEN_CACHE_PATH is a file path, not a secret — skip the false-positive lint check.
-# check=skip=SecretsUsedInArgOrEnv
-
 FROM node:20-alpine AS builder
 
 WORKDIR /app
@@ -25,13 +21,12 @@ RUN npm ci --omit=dev --no-fund --silent
 
 COPY --from=builder /app/dist ./dist
 
-# Token cache lives at /data/tokens.json (override via TOKEN_CACHE_PATH)
+# Token cache lives at /data/tokens.json (override TOKEN_CACHE_PATH at runtime)
 VOLUME ["/data"]
 
 USER node
 
 ENV NODE_ENV=production
-ENV TOKEN_CACHE_PATH=/data/tokens.json
 
 # When PORT is set the server listens on HTTP (Kubernetes mode).
 # When PORT is unset the server uses stdio (Claude Code / local mode).
