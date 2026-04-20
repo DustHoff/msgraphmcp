@@ -168,11 +168,11 @@ describe('Intune Tools', () => {
 
   describe('get_configuration_policy', () => {
     it('fetches policy and settings', async () => {
-      graph.get.mockResolvedValue({ id: 'p1', name: 'Test' });
-      graph.getAll.mockResolvedValue([{ id: 's1' }]);
+      graph.beta.get.mockResolvedValue({ id: 'p1', name: 'Test' });
+      graph.beta.getAll.mockResolvedValue([{ id: 's1' }]);
       const result = await server.call('get_configuration_policy', { policyId: 'p1' });
-      expect(graph.get).toHaveBeenCalledWith('/deviceManagement/configurationPolicies/p1');
-      expect(graph.getAll).toHaveBeenCalledWith('/deviceManagement/configurationPolicies/p1/settings');
+      expect(graph.beta.get).toHaveBeenCalledWith('/deviceManagement/configurationPolicies/p1');
+      expect(graph.beta.getAll).toHaveBeenCalledWith('/deviceManagement/configurationPolicies/p1/settings');
       const parsed = JSON.parse(result.content[0].text);
       expect(parsed.policy).toBeDefined();
       expect(parsed.settings).toBeDefined();

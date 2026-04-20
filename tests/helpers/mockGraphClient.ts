@@ -1,7 +1,15 @@
 import { GraphClient } from '../../src/graph/GraphClient';
 
+export type MockBetaClient = {
+  get: jest.MockedFunction<(...args: unknown[]) => Promise<unknown>>;
+  getAll: jest.MockedFunction<(...args: unknown[]) => Promise<unknown[]>>;
+  post: jest.MockedFunction<(...args: unknown[]) => Promise<unknown>>;
+  patch: jest.MockedFunction<(...args: unknown[]) => Promise<unknown>>;
+  delete: jest.MockedFunction<(...args: unknown[]) => Promise<void>>;
+};
+
 export type MockGraphClient = {
-  [K in keyof GraphClient]: jest.MockedFunction<GraphClient[K]>;
+  [K in keyof GraphClient]: K extends 'beta' ? MockBetaClient : jest.MockedFunction<GraphClient[K]>;
 };
 
 export function createMockGraphClient(): MockGraphClient {
@@ -12,6 +20,13 @@ export function createMockGraphClient(): MockGraphClient {
     patch: jest.fn(),
     put: jest.fn(),
     delete: jest.fn(),
+    beta: {
+      get: jest.fn(),
+      getAll: jest.fn(),
+      post: jest.fn(),
+      patch: jest.fn(),
+      delete: jest.fn(),
+    },
   } as unknown as MockGraphClient;
 }
 
