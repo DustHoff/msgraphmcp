@@ -749,14 +749,11 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
       displayName: z.string().describe('Display name of the template'),
       description: z.string().optional(),
       defaultLocale: z.string().default('en-US').describe('Fallback locale, e.g. "en-US"'),
-      brandingOptions: z.enum([
-        'none',
-        'includeCompanyLogo',
-        'includeCompanyName',
-        'includeContactInformation',
-        'includeCompanyPortalLink',
-        'includeDeviceDetails',
-      ]).default('none'),
+      brandingOptions: z.string().default('none').describe(
+        'Comma-separated branding flags, e.g. "includeCompanyLogo,includeCompanyName,includeContactInformation". ' +
+        'Possible values: none, includeCompanyLogo, includeCompanyName, includeContactInformation, ' +
+        'includeCompanyPortalLink, includeDeviceDetails'
+      ),
       roleScopeTagIds: z.array(z.string()).optional().describe('Scope tag ids to assign to this template'),
     },
     async ({ displayName, description, defaultLocale, brandingOptions, roleScopeTagIds }) => {
@@ -776,14 +773,11 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
       displayName: z.string().optional(),
       description: z.string().optional(),
       defaultLocale: z.string().optional(),
-      brandingOptions: z.enum([
-        'none',
-        'includeCompanyLogo',
-        'includeCompanyName',
-        'includeContactInformation',
-        'includeCompanyPortalLink',
-        'includeDeviceDetails',
-      ]).optional(),
+      brandingOptions: z.string().optional().describe(
+        'Comma-separated branding flags, e.g. "includeCompanyLogo,includeCompanyName". ' +
+        'Possible values: none, includeCompanyLogo, includeCompanyName, includeContactInformation, ' +
+        'includeCompanyPortalLink, includeDeviceDetails'
+      ),
       roleScopeTagIds: z.array(z.string()).optional().describe('Scope tag ids to assign to this template'),
     },
     async ({ templateId, displayName, description, defaultLocale, brandingOptions, roleScopeTagIds }) => {
