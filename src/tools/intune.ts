@@ -690,7 +690,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'Get a tenant-wide compliance state overview across all managed devices.',
     {},
     async () => {
-      const overview = await graph.get('/deviceManagement/deviceComplianceOverview');
+      const overview = await graph.beta.get('/deviceManagement/deviceComplianceOverview');
       return { content: [{ type: 'text', text: JSON.stringify(overview, null, 2) }] };
     }
   );
