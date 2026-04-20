@@ -758,7 +758,6 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     },
     async ({ displayName, description, defaultLocale, brandingOptions, roleScopeTagIds }) => {
       const body: Record<string, unknown> = {
-        '@odata.type': '#microsoft.graph.notificationMessageTemplate',
         displayName,
         defaultLocale,
         brandingOptions,
