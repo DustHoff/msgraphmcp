@@ -30,6 +30,9 @@ describe('Intune Tools', () => {
     'list_managed_devices', 'get_managed_device', 'sync_managed_device',
     'restart_managed_device', 'retire_managed_device', 'wipe_managed_device',
     'get_device_compliance_overview', 'list_intune_app_protection_policies',
+    'list_notification_templates', 'get_notification_template', 'create_notification_template',
+    'update_notification_template', 'delete_notification_template',
+    'add_notification_template_message', 'send_notification_template_test',
   ];
 
   it('registers all Intune tools', () => {
@@ -260,6 +263,65 @@ describe('Intune Tools', () => {
       expect(graph.getAll).toHaveBeenCalledTimes(1);
       const [url] = args(graph.getAll);
       expect(url).toContain('ios');
+    });
+  });
+
+  // ── Notification template tests ───────────────────────────────────────────
+
+  describe('create_notification_template', () => {
+    it('posts template with required fields', async () => {
+      graph.post.mockResolvedValue({ id: 'tmpl1', displayName: 'Test' });
+      const result = await server.call('create_notification_template', {
+        displayName: 'Device Non-Compliance',
+        defaultLocale: 'en-US',
+        brandingOptions: 'includeCompanyName',
+      });
+      const [url, body] = args(graph.post);
+      expect(url).toBe('/deviceManagement/notificationMessageTemplates');
+      expect(body.displayName).toBe('Device Non-Compliance');
+      expect(body.brandingOptions).toBe('includeCompanyName');
+      expect(result.content[0].text).toContain('tmpl1');
+    });
+  });
+
+  describe('get_notification_template', () => {
+    it('fetches template and localized messages', async () => {
+      graph.get.mockResolvedValue({ id: 'tmpl1' });
+      graph.getAll.mockResolvedValue([{ locale: 'en-US', subject: 'Subject' }]);
+      const result = await server.call('get_notification_template', { templateId: 'tmpl1' });
+      expect(graph.get).toHaveBeenCalledWith('/deviceManagement/notificationMessageTemplates/tmpl1');
+      expect(graph.getAll).toHaveBeenCalledWith(
+        '/deviceManagement/notificationMessageTemplates/tmpl1/localizedNotificationMessages'
+      );
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.template).toBeDefined();
+      expect(parsed.localizedMessages).toBeDefined();
+    });
+  });
+
+  describe('add_notification_template_message', () => {
+    it('posts localized message with correct body', async () => {
+      graph.post.mockResolvedValue({ id: 'msg1', locale: 'de-DE' });
+      await server.call('add_notification_template_message', {
+        templateId: 'tmpl1',
+        locale: 'de-DE',
+        subject: 'Gerät nicht konform',
+        messageTemplate: 'Ihr Gerät erfüllt nicht die Anforderungen.',
+        isDefault: false,
+      });
+      const [url, body] = args(graph.post);
+      expect(url).toBe('/deviceManagement/notificationMessageTemplates/tmpl1/localizedNotificationMessages');
+      expect(body.locale).toBe('de-DE');
+      expect(body.isDefault).toBe(false);
+    });
+  });
+
+  describe('send_notification_template_test', () => {
+    it('posts to sendTestMessage action', async () => {
+      graph.post.mockResolvedValue(undefined);
+      await server.call('send_notification_template_test', { templateId: 'tmpl1' });
+      const [url] = args(graph.post);
+      expect(url).toBe('/deviceManagement/notificationMessageTemplates/tmpl1/sendTestMessage');
     });
   });
 });

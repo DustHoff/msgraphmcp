@@ -714,4 +714,123 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
       return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
     }
   );
+
+  // ── Notification Message Templates ────────────────────────────────────────
+
+  server.tool(
+    'list_notification_templates',
+    'List Intune notification message templates.',
+    {
+      top: z.number().int().min(1).max(999).default(50),
+    },
+    async ({ top }) => {
+      const templates = await graph.getAll('/deviceManagement/notificationMessageTemplates', { $top: top });
+      return { content: [{ type: 'text', text: JSON.stringify(templates, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'get_notification_template',
+    'Get a notification message template by id (including its localized messages).',
+    { templateId: z.string() },
+    async ({ templateId }) => {
+      const [template, messages] = await Promise.all([
+        graph.get(`/deviceManagement/notificationMessageTemplates/${templateId}`),
+        graph.getAll(`/deviceManagement/notificationMessageTemplates/${templateId}/localizedNotificationMessages`),
+      ]);
+      return { content: [{ type: 'text', text: JSON.stringify({ template, localizedMessages: messages }, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'create_notification_template',
+    'Create an Intune notification message template.',
+    {
+      displayName: z.string().describe('Display name of the template'),
+      description: z.string().optional(),
+      defaultLocale: z.string().default('en-US').describe('Fallback locale, e.g. "en-US"'),
+      brandingOptions: z.enum([
+        'none',
+        'includeCompanyLogo',
+        'includeCompanyName',
+        'includeContactInformation',
+        'includeCompanyPortalLink',
+        'includeDeviceDetails',
+      ]).default('none'),
+    },
+    async ({ displayName, description, defaultLocale, brandingOptions }) => {
+      const body: Record<string, unknown> = { displayName, defaultLocale, brandingOptions };
+      if (description) body.description = description;
+      const template = await graph.post('/deviceManagement/notificationMessageTemplates', body);
+      return { content: [{ type: 'text', text: JSON.stringify(template, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'update_notification_template',
+    'Update an Intune notification message template.',
+    {
+      templateId: z.string(),
+      displayName: z.string().optional(),
+      description: z.string().optional(),
+      defaultLocale: z.string().optional(),
+      brandingOptions: z.enum([
+        'none',
+        'includeCompanyLogo',
+        'includeCompanyName',
+        'includeContactInformation',
+        'includeCompanyPortalLink',
+        'includeDeviceDetails',
+      ]).optional(),
+    },
+    async ({ templateId, displayName, description, defaultLocale, brandingOptions }) => {
+      const body: Record<string, unknown> = {};
+      if (displayName) body.displayName = displayName;
+      if (description) body.description = description;
+      if (defaultLocale) body.defaultLocale = defaultLocale;
+      if (brandingOptions) body.brandingOptions = brandingOptions;
+      const template = await graph.patch(`/deviceManagement/notificationMessageTemplates/${templateId}`, body);
+      return { content: [{ type: 'text', text: JSON.stringify(template, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'delete_notification_template',
+    'Delete an Intune notification message template.',
+    { templateId: z.string() },
+    async ({ templateId }) => {
+      await graph.delete(`/deviceManagement/notificationMessageTemplates/${templateId}`);
+      return { content: [{ type: 'text', text: `Notification template ${templateId} deleted.` }] };
+    }
+  );
+
+  server.tool(
+    'add_notification_template_message',
+    'Add or update a localized message for a notification template.',
+    {
+      templateId: z.string(),
+      locale: z.string().describe('Locale tag, e.g. "en-US", "de-DE"'),
+      subject: z.string().describe('Email subject line'),
+      messageTemplate: z.string().describe('Email body (plain text or HTML)'),
+      isDefault: z.boolean().default(false).describe('Set as default/fallback locale'),
+    },
+    async ({ templateId, locale, subject, messageTemplate, isDefault }) => {
+      const body = { locale, subject, messageTemplate, isDefault };
+      const msg = await graph.post(
+        `/deviceManagement/notificationMessageTemplates/${templateId}/localizedNotificationMessages`,
+        body
+      );
+      return { content: [{ type: 'text', text: JSON.stringify(msg, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'send_notification_template_test',
+    'Send a test notification email using the template (uses the default locale).',
+    { templateId: z.string() },
+    async ({ templateId }) => {
+      await graph.post(`/deviceManagement/notificationMessageTemplates/${templateId}/sendTestMessage`, {});
+      return { content: [{ type: 'text', text: `Test message sent for template ${templateId}.` }] };
+    }
+  );
 }
