@@ -792,7 +792,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
       if (defaultLocale) body.defaultLocale = defaultLocale;
       if (brandingOptions) body.brandingOptions = brandingOptions;
       if (roleScopeTagIds) body.roleScopeTagIds = roleScopeTagIds;
-      const template = await graph.beta.patch(`/deviceManagement/notificationMessageTemplates/${templateId}`, body);
+      const template = await graph.patch(`/deviceManagement/notificationMessageTemplates/${templateId}`, body);
       return { content: [{ type: 'text', text: JSON.stringify(template, null, 2) }] };
     }
   );
@@ -802,7 +802,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'Delete an Intune notification message template.',
     { templateId: z.string() },
     async ({ templateId }) => {
-      await graph.beta.delete(`/deviceManagement/notificationMessageTemplates/${templateId}`);
+      await graph.delete(`/deviceManagement/notificationMessageTemplates/${templateId}`);
       return { content: [{ type: 'text', text: `Notification template ${templateId} deleted.` }] };
     }
   );
@@ -818,8 +818,14 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
       isDefault: z.boolean().default(false).describe('Set as default/fallback locale'),
     },
     async ({ templateId, locale, subject, messageTemplate, isDefault }) => {
-      const body = { locale, subject, messageTemplate, isDefault };
-      const msg = await graph.beta.post(
+      const body = {
+        '@odata.type': '#microsoft.graph.localizedNotificationMessage',
+        locale,
+        subject,
+        messageTemplate,
+        isDefault,
+      };
+      const msg = await graph.post(
         `/deviceManagement/notificationMessageTemplates/${templateId}/localizedNotificationMessages`,
         body
       );
@@ -832,7 +838,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'Send a test notification email using the template (uses the default locale).',
     { templateId: z.string() },
     async ({ templateId }) => {
-      await graph.beta.post(`/deviceManagement/notificationMessageTemplates/${templateId}/sendTestMessage`, {});
+      await graph.post(`/deviceManagement/notificationMessageTemplates/${templateId}/sendTestMessage`, {});
       return { content: [{ type: 'text', text: `Test message sent for template ${templateId}.` }] };
     }
   );
