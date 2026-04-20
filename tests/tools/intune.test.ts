@@ -269,14 +269,14 @@ describe('Intune Tools', () => {
   // ── Notification template tests ───────────────────────────────────────────
 
   describe('create_notification_template', () => {
-    it('posts template with required fields', async () => {
-      graph.post.mockResolvedValue({ id: 'tmpl1', displayName: 'Test' });
+    it('posts template with required fields via beta', async () => {
+      graph.beta.post.mockResolvedValue({ id: 'tmpl1', displayName: 'Test' });
       const result = await server.call('create_notification_template', {
         displayName: 'Device Non-Compliance',
         defaultLocale: 'en-US',
         brandingOptions: 'includeCompanyName',
       });
-      const [url, body] = args(graph.post);
+      const [url, body] = args(graph.beta.post);
       expect(url).toBe('/deviceManagement/notificationMessageTemplates');
       expect(body.displayName).toBe('Device Non-Compliance');
       expect(body.brandingOptions).toBe('includeCompanyName');
@@ -300,8 +300,8 @@ describe('Intune Tools', () => {
   });
 
   describe('add_notification_template_message', () => {
-    it('posts localized message with correct body', async () => {
-      graph.post.mockResolvedValue({ id: 'msg1', locale: 'de-DE' });
+    it('posts localized message via beta with correct body', async () => {
+      graph.beta.post.mockResolvedValue({ id: 'msg1', locale: 'de-DE' });
       await server.call('add_notification_template_message', {
         templateId: 'tmpl1',
         locale: 'de-DE',
@@ -309,7 +309,7 @@ describe('Intune Tools', () => {
         messageTemplate: 'Ihr Gerät erfüllt nicht die Anforderungen.',
         isDefault: false,
       });
-      const [url, body] = args(graph.post);
+      const [url, body] = args(graph.beta.post);
       expect(url).toBe('/deviceManagement/notificationMessageTemplates/tmpl1/localizedNotificationMessages');
       expect(body.locale).toBe('de-DE');
       expect(body.isDefault).toBe(false);
@@ -317,10 +317,10 @@ describe('Intune Tools', () => {
   });
 
   describe('send_notification_template_test', () => {
-    it('posts to sendTestMessage action', async () => {
-      graph.post.mockResolvedValue(undefined);
+    it('posts to sendTestMessage action via beta', async () => {
+      graph.beta.post.mockResolvedValue(undefined);
       await server.call('send_notification_template_test', { templateId: 'tmpl1' });
-      const [url] = args(graph.post);
+      const [url] = args(graph.beta.post);
       expect(url).toBe('/deviceManagement/notificationMessageTemplates/tmpl1/sendTestMessage');
     });
   });
