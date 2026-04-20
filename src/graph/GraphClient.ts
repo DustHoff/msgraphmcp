@@ -5,72 +5,114 @@ import { logger } from '../logger';
 const GRAPH_BASE = 'https://graph.microsoft.com/v1.0';
 const GRAPH_BETA = 'https://graph.microsoft.com/beta';
 
-// Extend InternalAxiosRequestConfig to carry request start time for duration logging
+const DEBUG = process.env.GRAPH_DEBUG !== 'false';
+
+// Relevant MS Graph response headers for diagnostics
+const DEBUG_RESPONSE_HEADERS = ['request-id', 'client-request-id', 'x-ms-ags-diagnostic', 'odata-version'];
+
 interface TimedRequestConfig extends InternalAxiosRequestConfig {
   _startMs?: number;
   _retried?: boolean;
 }
 
-export class GraphClient {
-  private http: AxiosInstance;
-  private tokenManager: TokenManager;
-  readonly beta: BetaClient;
+function pickHeaders(headers: Record<string, unknown> | undefined, keys: string[]): Record<string, unknown> {
+  if (!headers) return {};
+  const result: Record<string, unknown> = {};
+  for (const key of keys) {
+    if (headers[key] !== undefined) result[key] = headers[key];
+  }
+  return result;
+}
 
-  constructor(tokenManager: TokenManager) {
-    this.tokenManager = tokenManager;
-    this.http = axios.create({ baseURL: GRAPH_BASE });
-    this.beta = new BetaClient(tokenManager);
+function createAxiosInstance(baseURL: string, label: string, tokenManager: TokenManager): AxiosInstance {
+  const http = axios.create({ baseURL });
 
-    // ── Auth interceptor ──────────────────────────────────────────────────────
-    this.http.interceptors.request.use(async (config: TimedRequestConfig) => {
-      const token = await this.tokenManager.getAccessToken();
-      config.headers.Authorization = `Bearer ${token}`;
-      config.headers['Content-Type'] = 'application/json';
-      config._startMs = Date.now();
-      return config;
-    });
+  http.interceptors.request.use(async (config: TimedRequestConfig) => {
+    const token = await tokenManager.getAccessToken();
+    config.headers.Authorization = `Bearer ${token}`;
+    config.headers['Content-Type'] = 'application/json';
+    config._startMs = Date.now();
 
-    // ── Logging + success response ────────────────────────────────────────────
-    this.http.interceptors.response.use(
-      (res: AxiosResponse) => {
-        const cfg = res.config as TimedRequestConfig;
-        const duration = cfg._startMs !== undefined ? Date.now() - cfg._startMs : undefined;
-        logger.info('graph ok', {
+    if (DEBUG) {
+      const body = config.data ? JSON.parse(config.data as string) : undefined;
+      logger.info(`${label} request`, {
+        method: config.method?.toUpperCase(),
+        url: config.url,
+        ...(config.params && { params: config.params }),
+        ...(body !== undefined && { body }),
+      });
+    }
+
+    return config;
+  });
+
+  http.interceptors.response.use(
+    (res: AxiosResponse) => {
+      const cfg = res.config as TimedRequestConfig;
+      const duration = cfg._startMs !== undefined ? Date.now() - cfg._startMs : undefined;
+
+      logger.info(`${label} ok`, {
+        method: cfg.method?.toUpperCase(),
+        url: cfg.url,
+        status: res.status,
+        ...(duration !== undefined && { durationMs: duration }),
+      });
+
+      if (DEBUG) {
+        logger.info(`${label} response`, {
           method: cfg.method?.toUpperCase(),
           url: cfg.url,
           status: res.status,
-          ...(duration !== undefined && { durationMs: duration }),
+          headers: pickHeaders(res.headers as Record<string, unknown>, DEBUG_RESPONSE_HEADERS),
+          body: res.data,
         });
-        return res;
-      },
-      async (error) => {
-        const cfg = error.config as TimedRequestConfig | undefined;
-        const duration = cfg?._startMs !== undefined ? Date.now() - cfg._startMs : undefined;
-        const status: number | undefined = error.response?.status;
-        const msg: string = error.response?.data?.error?.message || error.message;
+      }
 
-        if (status === 401 && !cfg?._retried) {
-          logger.warn('graph 401 — retrying with fresh token', {
-            method: cfg?.method?.toUpperCase(),
-            url: cfg?.url,
-            ...(duration !== undefined && { durationMs: duration }),
-          });
-          const token = await this.tokenManager.getAccessToken();
-          error.config.headers.Authorization = `Bearer ${token}`;
-          error.config._retried = true;
-          return this.http.request(error.config);
-        }
+      return res;
+    },
+    async (error) => {
+      const cfg = error.config as TimedRequestConfig | undefined;
+      const duration = cfg?._startMs !== undefined ? Date.now() - cfg._startMs : undefined;
+      const status: number | undefined = error.response?.status;
+      const msg: string = error.response?.data?.error?.message || error.message;
 
-        logger.error('graph error', {
+      if (status === 401 && !cfg?._retried) {
+        logger.warn(`${label} 401 — retrying with fresh token`, {
           method: cfg?.method?.toUpperCase(),
           url: cfg?.url,
-          status,
-          message: msg,
           ...(duration !== undefined && { durationMs: duration }),
         });
-        throw new Error(`Graph API error ${status}: ${msg}`);
+        const token = await tokenManager.getAccessToken();
+        error.config.headers.Authorization = `Bearer ${token}`;
+        error.config._retried = true;
+        return http.request(error.config);
       }
-    );
+
+      logger.error(`${label} error`, {
+        method: cfg?.method?.toUpperCase(),
+        url: cfg?.url,
+        status,
+        message: msg,
+        ...(duration !== undefined && { durationMs: duration }),
+        ...(DEBUG && error.response?.data && { responseBody: error.response.data }),
+        ...(DEBUG && error.response?.headers && {
+          headers: pickHeaders(error.response.headers as Record<string, unknown>, DEBUG_RESPONSE_HEADERS),
+        }),
+      });
+      throw new Error(`Graph API error ${status}: ${msg}`);
+    }
+  );
+
+  return http;
+}
+
+export class GraphClient {
+  private http: AxiosInstance;
+  readonly beta: BetaClient;
+
+  constructor(tokenManager: TokenManager) {
+    this.http = createAxiosInstance(GRAPH_BASE, 'graph', tokenManager);
+    this.beta = new BetaClient(tokenManager);
   }
 
   async get<T = unknown>(url: string, params?: Record<string, unknown>): Promise<T> {
@@ -115,60 +157,9 @@ export class GraphClient {
 
 class BetaClient {
   private http: AxiosInstance;
-  private tokenManager: TokenManager;
 
   constructor(tokenManager: TokenManager) {
-    this.tokenManager = tokenManager;
-    this.http = axios.create({ baseURL: GRAPH_BETA });
-
-    this.http.interceptors.request.use(async (config: TimedRequestConfig) => {
-      const token = await this.tokenManager.getAccessToken();
-      config.headers.Authorization = `Bearer ${token}`;
-      config.headers['Content-Type'] = 'application/json';
-      config._startMs = Date.now();
-      return config;
-    });
-
-    this.http.interceptors.response.use(
-      (res: AxiosResponse) => {
-        const cfg = res.config as TimedRequestConfig;
-        const duration = cfg._startMs !== undefined ? Date.now() - cfg._startMs : undefined;
-        logger.info('graph(beta) ok', {
-          method: cfg.method?.toUpperCase(),
-          url: cfg.url,
-          status: res.status,
-          ...(duration !== undefined && { durationMs: duration }),
-        });
-        return res;
-      },
-      async (error) => {
-        const cfg = error.config as TimedRequestConfig | undefined;
-        const duration = cfg?._startMs !== undefined ? Date.now() - cfg._startMs : undefined;
-        const status: number | undefined = error.response?.status;
-        const msg: string = error.response?.data?.error?.message || error.message;
-
-        if (status === 401 && !cfg?._retried) {
-          logger.warn('graph(beta) 401 — retrying with fresh token', {
-            method: cfg?.method?.toUpperCase(),
-            url: cfg?.url,
-            ...(duration !== undefined && { durationMs: duration }),
-          });
-          const token = await this.tokenManager.getAccessToken();
-          error.config.headers.Authorization = `Bearer ${token}`;
-          error.config._retried = true;
-          return this.http.request(error.config);
-        }
-
-        logger.error('graph(beta) error', {
-          method: cfg?.method?.toUpperCase(),
-          url: cfg?.url,
-          status,
-          message: msg,
-          ...(duration !== undefined && { durationMs: duration }),
-        });
-        throw new Error(`Graph API error ${status}: ${msg}`);
-      }
-    );
+    this.http = createAxiosInstance(GRAPH_BETA, 'graph(beta)', tokenManager);
   }
 
   async get<T = unknown>(url: string, params?: Record<string, unknown>): Promise<T> {
