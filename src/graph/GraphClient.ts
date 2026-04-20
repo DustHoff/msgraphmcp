@@ -25,7 +25,7 @@ function pickHeaders(headers: Record<string, unknown> | undefined, keys: string[
 }
 
 function createAxiosInstance(baseURL: string, label: string, tokenManager: TokenManager): AxiosInstance {
-  const http = axios.create({ baseURL });
+  const http = axios.create({ baseURL, maxRedirects: 0 });
 
   http.interceptors.request.use(async (config: TimedRequestConfig) => {
     const token = await tokenManager.getAccessToken();
@@ -87,9 +87,14 @@ function createAxiosInstance(baseURL: string, label: string, tokenManager: Token
         return http.request(error.config);
       }
 
+      // Capture actual response URL to detect silent proxy redirects
+      const finalUrl: string | undefined = (error.request as { res?: { responseUrl?: string } } | undefined)
+        ?.res?.responseUrl;
+
       logger.error(`${label} error`, {
         method: cfg?.method?.toUpperCase(),
         url: cfg?.url,
+        ...(finalUrl && finalUrl !== `${baseURL}${cfg?.url}` && { finalUrl }),
         status,
         message: msg,
         ...(duration !== undefined && { durationMs: duration }),
