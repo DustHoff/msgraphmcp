@@ -758,13 +758,14 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     },
     async ({ displayName, description, defaultLocale, brandingOptions, roleScopeTagIds }) => {
       const body: Record<string, unknown> = {
+        '@odata.type': '#microsoft.graph.notificationMessageTemplate',
         displayName,
         defaultLocale,
         brandingOptions,
       };
       if (description) body.description = description;
       if (roleScopeTagIds) body.roleScopeTagIds = roleScopeTagIds;
-      const template = await graph.beta.post('/deviceManagement/notificationMessageTemplates', body);
+      const template = await graph.post('/deviceManagement/notificationMessageTemplates', body);
       return { content: [{ type: 'text', text: JSON.stringify(template, null, 2) }] };
     }
   );
