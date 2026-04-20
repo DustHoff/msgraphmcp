@@ -757,7 +757,12 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
       roleScopeTagIds: z.array(z.string()).optional().describe('Scope tag ids to assign to this template'),
     },
     async ({ displayName, description, defaultLocale, brandingOptions, roleScopeTagIds }) => {
-      const body: Record<string, unknown> = { displayName, defaultLocale, brandingOptions };
+      const body: Record<string, unknown> = {
+        '@odata.type': '#microsoft.graph.notificationMessageTemplate',
+        displayName,
+        defaultLocale,
+        brandingOptions,
+      };
       if (description) body.description = description;
       if (roleScopeTagIds) body.roleScopeTagIds = roleScopeTagIds;
       const template = await graph.beta.post('/deviceManagement/notificationMessageTemplates', body);
