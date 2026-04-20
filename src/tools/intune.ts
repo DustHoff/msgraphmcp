@@ -353,7 +353,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     async ({ filter, top }) => {
       const params: Record<string, unknown> = { $top: top };
       if (filter) params['$filter'] = filter;
-      const policies = await graph.getAll('/deviceManagement/configurationPolicies', params);
+      const policies = await graph.beta.getAll('/deviceManagement/configurationPolicies', params);
       return { content: [{ type: 'text', text: JSON.stringify(policies, null, 2) }] };
     }
   );
@@ -364,8 +364,8 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     { policyId: z.string() },
     async ({ policyId }) => {
       const [policy, settings] = await Promise.all([
-        graph.get(`/deviceManagement/configurationPolicies/${policyId}`),
-        graph.getAll(`/deviceManagement/configurationPolicies/${policyId}/settings`),
+        graph.beta.get(`/deviceManagement/configurationPolicies/${policyId}`),
+        graph.beta.getAll(`/deviceManagement/configurationPolicies/${policyId}/settings`),
       ]);
       return { content: [{ type: 'text', text: JSON.stringify({ policy, settings }, null, 2) }] };
     }
@@ -395,7 +395,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
         settings: settings.map((s, idx) => ({ id: String(idx), settingInstance: s.settingInstance })),
       };
       if (description) body.description = description;
-      const policy = await graph.post('/deviceManagement/configurationPolicies', body);
+      const policy = await graph.beta.post('/deviceManagement/configurationPolicies', body);
       return { content: [{ type: 'text', text: JSON.stringify(policy, null, 2) }] };
     }
   );
@@ -412,7 +412,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
       const body: Record<string, unknown> = {};
       if (name) body.name = name;
       if (description) body.description = description;
-      const policy = await graph.patch(`/deviceManagement/configurationPolicies/${policyId}`, body);
+      const policy = await graph.beta.patch(`/deviceManagement/configurationPolicies/${policyId}`, body);
       return { content: [{ type: 'text', text: JSON.stringify(policy, null, 2) }] };
     }
   );
@@ -422,7 +422,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'Delete a Settings Catalog policy.',
     { policyId: z.string() },
     async ({ policyId }) => {
-      await graph.delete(`/deviceManagement/configurationPolicies/${policyId}`);
+      await graph.beta.delete(`/deviceManagement/configurationPolicies/${policyId}`);
       return { content: [{ type: 'text', text: `Policy ${policyId} deleted.` }] };
     }
   );
@@ -445,7 +445,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
             : buildAssignTarget(a.groupId),
         })),
       };
-      await graph.post(`/deviceManagement/configurationPolicies/${policyId}/assign`, body);
+      await graph.beta.post(`/deviceManagement/configurationPolicies/${policyId}/assign`, body);
       return { content: [{ type: 'text', text: `Policy ${policyId} assigned.` }] };
     }
   );
@@ -464,7 +464,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
         $search: `"${keyword}"`,
       };
       if (platform) params['$filter'] = `platforms has '${platform}'`;
-      const settings = await graph.get('/deviceManagement/configurationSettings', params);
+      const settings = await graph.beta.get('/deviceManagement/configurationSettings', params);
       return { content: [{ type: 'text', text: JSON.stringify(settings, null, 2) }] };
     }
   );
