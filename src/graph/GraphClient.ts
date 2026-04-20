@@ -34,12 +34,11 @@ function createAxiosInstance(baseURL: string, label: string, tokenManager: Token
     config._startMs = Date.now();
 
     if (DEBUG) {
-      const body = config.data ? JSON.parse(config.data as string) : undefined;
       logger.info(`${label} request`, {
         method: config.method?.toUpperCase(),
         url: config.url,
         ...(config.params && { params: config.params }),
-        ...(body !== undefined && { body }),
+        ...(config.data !== undefined && { body: config.data }),
       });
     }
 
