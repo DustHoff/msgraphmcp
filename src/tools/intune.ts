@@ -757,10 +757,12 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
         'includeCompanyPortalLink',
         'includeDeviceDetails',
       ]).default('none'),
+      roleScopeTagIds: z.array(z.string()).optional().describe('Scope tag ids to assign to this template'),
     },
-    async ({ displayName, description, defaultLocale, brandingOptions }) => {
+    async ({ displayName, description, defaultLocale, brandingOptions, roleScopeTagIds }) => {
       const body: Record<string, unknown> = { displayName, defaultLocale, brandingOptions };
       if (description) body.description = description;
+      if (roleScopeTagIds) body.roleScopeTagIds = roleScopeTagIds;
       const template = await graph.post('/deviceManagement/notificationMessageTemplates', body);
       return { content: [{ type: 'text', text: JSON.stringify(template, null, 2) }] };
     }
@@ -782,13 +784,15 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
         'includeCompanyPortalLink',
         'includeDeviceDetails',
       ]).optional(),
+      roleScopeTagIds: z.array(z.string()).optional().describe('Scope tag ids to assign to this template'),
     },
-    async ({ templateId, displayName, description, defaultLocale, brandingOptions }) => {
+    async ({ templateId, displayName, description, defaultLocale, brandingOptions, roleScopeTagIds }) => {
       const body: Record<string, unknown> = {};
       if (displayName) body.displayName = displayName;
       if (description) body.description = description;
       if (defaultLocale) body.defaultLocale = defaultLocale;
       if (brandingOptions) body.brandingOptions = brandingOptions;
+      if (roleScopeTagIds) body.roleScopeTagIds = roleScopeTagIds;
       const template = await graph.patch(`/deviceManagement/notificationMessageTemplates/${templateId}`, body);
       return { content: [{ type: 'text', text: JSON.stringify(template, null, 2) }] };
     }
