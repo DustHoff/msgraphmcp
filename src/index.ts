@@ -208,6 +208,15 @@ async function startHttp(port: number): Promise<void> {
       const incomingSessionId = req.headers['mcp-session-id'] as string | undefined;
       let transport = incomingSessionId ? sessions.get(incomingSessionId) : undefined;
 
+      // If the client provides a session ID that no longer exists (e.g. after a pod restart),
+      // return 404 so the client knows to re-initialize rather than sending tool calls to a
+      // brand-new uninitialised transport, which would yield "Server not initialized" errors.
+      if (incomingSessionId && !transport) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Session not found', sessionId: incomingSessionId }));
+        return;
+      }
+
       if (!transport) {
         // In auth-code mode all sessions share the global authenticated client.
         // In device-code mode each session gets its own isolated in-memory cache.
