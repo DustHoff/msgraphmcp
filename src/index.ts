@@ -102,6 +102,14 @@ async function startHttp(port: number): Promise<void> {
       redirectUri: REDIRECT_URI,
       loginUrl: BASE_LOGIN_URL,
     });
+  } else if (process.env.AZURE_CLIENT_SECRET) {
+    logger.warn(
+      'auth mode: client-credentials (app-only) — AZURE_REDIRECT_URI is not set. ' +
+      'Set AZURE_REDIRECT_URI to enable delegated (per-user) authentication.',
+      { hint: 'Each session will authenticate as the application identity, not as a user.' }
+    );
+  } else {
+    logger.info('auth mode: device-code (delegated, interactive)');
   }
 
   // Pending OAuth state: state-value → { codeVerifier, sessionId }

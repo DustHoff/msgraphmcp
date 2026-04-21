@@ -143,10 +143,11 @@ export class GraphClient {
     this.beta = new BetaClient(tokenManager, getLoginUrl);
   }
 
-  async getAuthStatus(): Promise<{ authenticated: boolean; loginUrl?: string }> {
+  async getAuthStatus(): Promise<{ authenticated: boolean; mode: string; loginUrl?: string }> {
+    const mode = this._tokenManager.authMode;
     const authenticated = await this._tokenManager.isAuthenticated().catch(() => false);
-    if (authenticated) return { authenticated: true };
-    return { authenticated: false, loginUrl: this._getLoginUrl?.() };
+    if (authenticated) return { authenticated: true, mode };
+    return { authenticated: false, mode, loginUrl: this._getLoginUrl?.() };
   }
 
   async get<T = unknown>(url: string, params?: Record<string, unknown>): Promise<T> {
