@@ -132,11 +132,21 @@ function createAxiosInstance(
 
 export class GraphClient {
   private http: AxiosInstance;
+  private _tokenManager: TokenManager;
+  private _getLoginUrl?: () => string;
   readonly beta: BetaClient;
 
   constructor(tokenManager: TokenManager, getLoginUrl?: () => string) {
+    this._tokenManager = tokenManager;
+    this._getLoginUrl = getLoginUrl;
     this.http = createAxiosInstance(GRAPH_BASE, 'graph', tokenManager, getLoginUrl);
     this.beta = new BetaClient(tokenManager, getLoginUrl);
+  }
+
+  async getAuthStatus(): Promise<{ authenticated: boolean; loginUrl?: string }> {
+    const authenticated = await this._tokenManager.isAuthenticated().catch(() => false);
+    if (authenticated) return { authenticated: true };
+    return { authenticated: false, loginUrl: this._getLoginUrl?.() };
   }
 
   async get<T = unknown>(url: string, params?: Record<string, unknown>): Promise<T> {
