@@ -1,5 +1,5 @@
 import axios, { AxiosInstance, AxiosRequestConfig, AxiosResponse, InternalAxiosRequestConfig } from 'axios';
-import { TokenManager } from '../auth/TokenManager';
+import { TokenManager, AuthRequiredError } from '../auth/TokenManager';
 import { logger } from '../logger';
 
 const GRAPH_BASE = 'https://graph.microsoft.com/v1.0';
@@ -25,14 +25,25 @@ function pickHeaders(headers: Record<string, unknown> | undefined, keys: string[
   return result;
 }
 
-function createAxiosInstance(baseURL: string, label: string, tokenManager: TokenManager): AxiosInstance {
+function createAxiosInstance(
+  baseURL: string,
+  label: string,
+  tokenManager: TokenManager,
+  getLoginUrl?: () => string,
+): AxiosInstance {
   const http = axios.create({ baseURL, maxRedirects: 0 });
 
   http.interceptors.request.use(async (config: TimedRequestConfig) => {
-    const [token, accountInfo] = await Promise.all([
-      tokenManager.getAccessToken(),
-      tokenManager.getAccountInfo().catch(() => null),
-    ]);
+    let token: string;
+    try {
+      token = await tokenManager.getAccessToken();
+    } catch (err) {
+      if (err instanceof AuthRequiredError && getLoginUrl) {
+        throw new AuthRequiredError(`Not authenticated — visit ${getLoginUrl()} to sign in with Microsoft`);
+      }
+      throw err;
+    }
+    const accountInfo = await tokenManager.getAccountInfo().catch(() => null);
     config.headers.Authorization = `Bearer ${token}`;
     config.headers['Content-Type'] = 'application/json';
     config._startMs = Date.now();
@@ -123,9 +134,9 @@ export class GraphClient {
   private http: AxiosInstance;
   readonly beta: BetaClient;
 
-  constructor(tokenManager: TokenManager) {
-    this.http = createAxiosInstance(GRAPH_BASE, 'graph', tokenManager);
-    this.beta = new BetaClient(tokenManager);
+  constructor(tokenManager: TokenManager, getLoginUrl?: () => string) {
+    this.http = createAxiosInstance(GRAPH_BASE, 'graph', tokenManager, getLoginUrl);
+    this.beta = new BetaClient(tokenManager, getLoginUrl);
   }
 
   async get<T = unknown>(url: string, params?: Record<string, unknown>): Promise<T> {
@@ -171,8 +182,8 @@ export class GraphClient {
 class BetaClient {
   private http: AxiosInstance;
 
-  constructor(tokenManager: TokenManager) {
-    this.http = createAxiosInstance(GRAPH_BETA, 'graph(beta)', tokenManager);
+  constructor(tokenManager: TokenManager, getLoginUrl?: () => string) {
+    this.http = createAxiosInstance(GRAPH_BETA, 'graph(beta)', tokenManager, getLoginUrl);
   }
 
   async get<T = unknown>(url: string, params?: Record<string, unknown>): Promise<T> {

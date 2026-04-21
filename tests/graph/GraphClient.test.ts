@@ -3,7 +3,18 @@ import { GraphClient } from '../../src/graph/GraphClient';
 import { TokenManager } from '../../src/auth/TokenManager';
 
 jest.mock('axios');
-jest.mock('../../src/auth/TokenManager');
+jest.mock('../../src/auth/TokenManager', () => {
+  const actual = jest.requireActual('../../src/auth/TokenManager');
+  return {
+    ...actual,
+    TokenManager: jest.fn().mockImplementation(() => ({
+      getAccessToken: jest.fn(),
+      getAccountInfo: jest.fn(),
+      isAuthenticated: jest.fn(),
+      authMode: 'device-code' as const,
+    })),
+  };
+});
 jest.mock('../../src/logger', () => ({
   logger: { debug: jest.fn(), info: jest.fn(), warn: jest.fn(), error: jest.fn() },
 }));
@@ -73,6 +84,24 @@ describe('GraphClient', () => {
       const config: Record<string, unknown> = { headers: {} };
       const result = await requestInterceptor(config);
       expect(result._user).toBe('test@contoso.com');
+    });
+
+    it('enhances AuthRequiredError message with loginUrl when getLoginUrl is provided', async () => {
+      const { AuthRequiredError } = jest.requireActual('../../src/auth/TokenManager') as typeof import('../../src/auth/TokenManager');
+
+      const mockTokenManagerUnauth = new (TokenManager as jest.MockedClass<typeof TokenManager>)();
+      (mockTokenManagerUnauth.getAccessToken as jest.Mock).mockRejectedValue(new AuthRequiredError());
+
+      const getLoginUrl = jest.fn().mockReturnValue('https://example.com/auth/login?session_id=abc');
+      new GraphClient(mockTokenManagerUnauth, getLoginUrl);
+
+      // The new GraphClient registers its own interceptors; grab the last v1.0 one
+      const interceptorCalls = mockHttp.interceptors.request.use.mock.calls;
+      const unauthInterceptor = interceptorCalls[interceptorCalls.length - 2][0]; // v1.0 (beta is last)
+
+      await expect(unauthInterceptor({ headers: {} })).rejects.toMatchObject({
+        message: expect.stringContaining('https://example.com/auth/login?session_id=abc'),
+      });
     });
   });
 

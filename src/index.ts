@@ -265,7 +265,15 @@ async function startHttp(port: number): Promise<void> {
         // In auth-code mode this ensures tokens are never shared across users —
         // each session authenticates independently via /auth/login?session_id=<id>.
         const sessionTokenManager = new TokenManager({ persistCache: false });
-        const sessionGraphClient = new GraphClient(sessionTokenManager);
+
+        // getLoginUrl is resolved lazily — sessionId is set by onsessioninitialized
+        // before any tool call can reach getAccessToken(), so it is always populated.
+        let sessionId: string | undefined;
+        const getLoginUrl = isAuthCodeMode
+          ? () => `${REDIRECT_URI.replace('/auth/callback', '/auth/login')}?session_id=${sessionId}`
+          : undefined;
+
+        const sessionGraphClient = new GraphClient(sessionTokenManager, getLoginUrl);
 
         let resolveSessionId: (id: string) => void;
         const sessionIdPromise = new Promise<string>((r) => { resolveSessionId = r; });
@@ -273,6 +281,7 @@ async function startHttp(port: number): Promise<void> {
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (id) => {
+            sessionId = id;
             sessions.set(id, { transport: transport!, tokenManager: sessionTokenManager, graphClient: sessionGraphClient });
             resolveSessionId(id);
             logger.info('mcp session opened', { sessionId: id, activeSessions: sessions.size });
