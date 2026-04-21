@@ -95,11 +95,12 @@ async function startHttp(port: number): Promise<void> {
 
   const isAuthCodeMode = Boolean(process.env.AZURE_REDIRECT_URI && process.env.AZURE_CLIENT_SECRET);
   const REDIRECT_URI = process.env.AZURE_REDIRECT_URI ?? '';
+  const BASE_LOGIN_URL = REDIRECT_URI.replace('/auth/callback', '/auth/login');
 
   if (isAuthCodeMode) {
     logger.info('auth mode: authorization-code (delegated, per-session)', {
       redirectUri: REDIRECT_URI,
-      loginUrl: REDIRECT_URI.replace('/auth/callback', '/auth/login'),
+      loginUrl: BASE_LOGIN_URL,
     });
   }
 
@@ -107,6 +108,20 @@ async function startHttp(port: number): Promise<void> {
   // sessionId binds the OAuth callback to the exact MCP session that initiated the login.
   // Entries expire after 10 minutes to avoid unbounded growth.
   const pendingAuth = new Map<string, { codeVerifier: string; sessionId: string; expiresAt: number }>();
+
+  // One-time login tokens: token → { sessionId, expiresAt }
+  // Session IDs are never exposed in URLs — instead a short-lived, one-time-use token is
+  // issued per authentication attempt. This prevents session token injection: even if an
+  // attacker sees the login URL (from browser history, logs, etc.) they cannot reuse it
+  // after the legitimate user has clicked it, and the session ID itself is never revealed.
+  const loginTokens = new Map<string, { sessionId: string; expiresAt: number }>();
+  const LOGIN_TOKEN_TTL_MS = 15 * 60 * 1000; // 15 minutes
+
+  function generateLoginUrl(sid: string): string {
+    const token = randomBytes(32).toString('hex');
+    loginTokens.set(token, { sessionId: sid, expiresAt: Date.now() + LOGIN_TOKEN_TTL_MS });
+    return `${BASE_LOGIN_URL}?token=${token}`;
+  }
 
   // Close sessions that have been idle longer than SESSION_IDLE_TIMEOUT_MS.
   const idleCheckInterval = setInterval(() => {
@@ -125,6 +140,9 @@ async function startHttp(port: number): Promise<void> {
     const now = Date.now();
     for (const [key, val] of pendingAuth) {
       if (val.expiresAt < now) pendingAuth.delete(key);
+    }
+    for (const [tok, entry] of loginTokens) {
+      if (entry.expiresAt < now) loginTokens.delete(tok);
     }
   }
 
@@ -165,9 +183,9 @@ async function startHttp(port: number): Promise<void> {
     }
 
     // ── OAuth Authorization Code: start flow ────────────────────────────────
-    // GET /auth/login?session_id=<mcp-session-id>  → redirects to Microsoft login page.
-    // The session_id binds this OAuth flow to a specific MCP session so its token
-    // is never shared with other sessions (multi-user isolation).
+    // GET /auth/login?token=<one-time-token>  → redirects to Microsoft login page.
+    // The token is a short-lived (15 min), one-time-use value that maps server-side to
+    // the MCP session ID — the session ID itself is never exposed in URLs.
     // Prerequisites: AZURE_REDIRECT_URI + AZURE_CLIENT_SECRET env vars set.
     if (url.pathname === '/auth/login') {
       if (!isAuthCodeMode) {
@@ -175,20 +193,30 @@ async function startHttp(port: number): Promise<void> {
         res.end('Authorization code mode not configured. Set AZURE_REDIRECT_URI and AZURE_CLIENT_SECRET.');
         return;
       }
-      const sessionId = url.searchParams.get('session_id');
-      const session = sessionId ? sessions.get(sessionId) : undefined;
-      if (!sessionId || !session) {
+
+      // Look up the one-time login token — delete immediately to prevent replay.
+      const token = url.searchParams.get('token');
+      const loginEntry = token ? loginTokens.get(token) : undefined;
+      if (!token || !loginEntry || loginEntry.expiresAt < Date.now()) {
         res.writeHead(400, { 'Content-Type': 'text/plain' });
         res.end(
-          'session_id is required and must match an active MCP session.\n' +
-          'Connect your MCP client first; the session ID is returned in the mcp-session-id ' +
-          'response header, or in the loginUrl field of a tool call error.'
+          'Invalid or expired login token.\n' +
+          'Trigger a tool call via your MCP client to receive a fresh login URL.'
         );
+        return;
+      }
+      loginTokens.delete(token); // one-time use — consumed immediately
+
+      const sessionId = loginEntry.sessionId;
+      const session = sessions.get(sessionId);
+      if (!session) {
+        res.writeHead(400, { 'Content-Type': 'text/plain' });
+        res.end('MCP session has expired or disconnected. Please reconnect your MCP client.');
         return;
       }
 
       // Reject login attempts for already-authenticated sessions — prevents token
-      // replacement by an attacker who knows the session ID.
+      // replacement even if a token was somehow obtained for an active session.
       const alreadyAuthenticated = await session.tokenManager.isAuthenticated().catch(() => false);
       if (alreadyAuthenticated) {
         res.writeHead(409, { 'Content-Type': 'text/plain' });
@@ -302,14 +330,14 @@ async function startHttp(port: number): Promise<void> {
 
         // Each MCP session gets its own isolated TokenManager and GraphClient.
         // In auth-code mode this ensures tokens are never shared across users —
-        // each session authenticates independently via /auth/login?session_id=<id>.
+        // each session authenticates independently via a one-time login token.
         const sessionTokenManager = new TokenManager({ persistCache: false });
 
-        // getLoginUrl is resolved lazily — sessionId is set by onsessioninitialized
-        // before any tool call can reach getAccessToken(), so it is always populated.
+        // getLoginUrl issues a fresh one-time login token on each call.
+        // sessionId is set by onsessioninitialized before any tool call can fire.
         let sessionId: string | undefined;
         const getLoginUrl = isAuthCodeMode
-          ? () => `${REDIRECT_URI.replace('/auth/callback', '/auth/login')}?session_id=${sessionId}`
+          ? () => generateLoginUrl(sessionId!)
           : undefined;
 
         const sessionGraphClient = new GraphClient(sessionTokenManager, getLoginUrl);
@@ -358,11 +386,10 @@ async function startHttp(port: number): Promise<void> {
 
     } catch (err) {
       if (err instanceof AuthRequiredError) {
-        const baseLoginUrl = REDIRECT_URI.replace('/auth/callback', '/auth/login');
         const loginUrl = incomingSessionId
-          ? `${baseLoginUrl}?session_id=${incomingSessionId}`
-          : baseLoginUrl;
-        logger.warn('auth: unauthenticated mcp request', { sessionId: incomingSessionId, loginUrl });
+          ? generateLoginUrl(incomingSessionId)
+          : BASE_LOGIN_URL;
+        logger.warn('auth: unauthenticated mcp request', { sessionId: incomingSessionId });
         if (!res.headersSent) {
           res.writeHead(401, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({
