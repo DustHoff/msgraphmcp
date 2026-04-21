@@ -43,12 +43,12 @@
 ## Architecture
 
 ```
-Claude Code (MCP client)
-       │  stdio / HTTP
-       ▼
+Claude Code (MCP client)           Another MCP client
+       │  stdio / HTTP                    │  HTTP
+       ▼                                  ▼
   msgraphmcp (Node.js / TypeScript)
-  ├── auth/TokenManager     Four auth modes (see below)
-  ├── graph/GraphClient     Axios wrapper, auto-pagination, single retry on 401
+  ├── auth/TokenManager     Four auth modes — per-session in HTTP mode
+  ├── graph/GraphClient     Axios wrapper, user-stamped logs, auto-pagination, single retry on 401
   └── tools/
       ├── users · mail · calendar · files · groups
       ├── teams · contacts · tasks · sites
@@ -57,11 +57,15 @@ Claude Code (MCP client)
        ▼
   Microsoft Graph API  (https://graph.microsoft.com/v1.0)
 
-HTTP mode auth flow (authorization code):
-  Browser → GET /auth/login → Microsoft Login → GET /auth/callback → tokens cached
+HTTP mode auth flow (authorization code, per-session):
+  1. MCP client connects  →  server creates session with isolated TokenManager
+  2. Tool call without auth  →  401 + loginUrl (/auth/login?session_id=<id>)
+  3. Browser → GET /auth/login?session_id=<id>  →  Microsoft Login
+  4. GET /auth/callback  →  token stored in that session's TokenManager only
+  5. Subsequent tool calls from the same session use that user's token exclusively
 ```
 
-Token cache is persisted to disk (`/data/tokens.json` in the container) and mounted as a Docker volume so tokens survive restarts without re-authentication.
+In HTTP mode every MCP session gets its own isolated `TokenManager` — tokens are never shared between sessions. Each user authenticates independently. Tokens are kept in-memory for the lifetime of the session; no cross-user token bleed is possible even when multiple clients are connected simultaneously.
 
 ---
 
@@ -241,33 +245,69 @@ Four modes are selected automatically by which environment variables are set:
 
 ### Mode A — Authorization Code + PKCE (delegated, recommended for HTTP/Kubernetes)
 
-Set `AZURE_CLIENT_SECRET` **and** `AZURE_REDIRECT_URI`. The user signs in once via a browser; tokens are cached on disk and refreshed silently. Suitable for containers with Entra ID Conditional Access — CA compliance is evaluated against the **user's browser device**, not the container.
+Set `AZURE_CLIENT_SECRET` **and** `AZURE_REDIRECT_URI`. Each MCP session authenticates independently — tokens are isolated per session and kept in-memory. Suitable for containers with Entra ID Conditional Access — CA compliance is evaluated against the **user's browser device**, not the container. Multiple users can be authenticated simultaneously.
 
 **Prerequisites:**
 - Register `AZURE_REDIRECT_URI` (e.g. `https://msgraph.example.com/auth/callback`) as a **Web** redirect URI in the Entra ID app registration.
 - Grant **Delegated** permissions (not Application) + admin consent.
 
+#### Authentication flow
+
 ```
-Initial login (one-time)
-  GET /auth/login
+Step 1 — Connect your MCP client (Claude Code or other)
+  POST /mcp  (initialize)
+  └─► Server creates a session with its own isolated TokenManager
+  └─► Session ID returned in response header:  mcp-session-id: <uuid>
+
+Step 2 — Authenticate (once per session / pod restart)
+  GET /auth/login?session_id=<uuid>
   └─► Server generates PKCE code_verifier + S256 challenge
   └─► Redirects browser → Microsoft login page
   └─► User authenticates + consents
   └─► Microsoft redirects → GET /auth/callback?code=...&state=...
-  └─► Server exchanges code for tokens (acquireTokenByCode)
-  └─► Tokens written to TOKEN_CACHE_PATH
+  └─► Server exchanges code and stores tokens in that session's TokenManager only
+  └─► Green success page shown — browser can be closed
 
-Subsequent requests
-  └─► acquireTokenSilent() — uses cached refresh token
-  └─► On 401: single retry with fresh token, then error
-
-Health check
-  GET /health → { "authenticated": true, "authMode": "authorization-code" }
+Step 3 — Tool calls
+  └─► acquireTokenSilent() — uses the session's in-memory refresh token
+  └─► On 401 from Graph: single retry with fresh token, then error
 ```
 
-After deploying, visit `https://<your-host>/auth/login` to authenticate. On success a green confirmation page is shown and the browser can be closed.
+#### How to find your session ID
 
-**Kubernetes deployment:**
+The session ID is embedded in every 401 response when a tool call is made before authenticating:
+
+```json
+{
+  "error": "Unauthorized",
+  "loginUrl": "https://msgraph.example.com/auth/login?session_id=1df3d7cc-d45b-4c27-992d-26f06eb8488d"
+}
+```
+
+Open the `loginUrl` directly in a browser to authenticate. Alternatively, the session ID is available in the `mcp-session-id` header of the MCP initialize response.
+
+#### Health check
+
+```
+GET /health
+→ {
+    "status": "ok",
+    "authMode": "authorization-code",
+    "sessions": 2,
+    "authenticatedSessions": 1,
+    "sessionDetails": [
+      { "sessionId": "1df3d7cc-...", "authenticated": true,  "user": "alice@contoso.com" },
+      { "sessionId": "9a2f1bc0-...", "authenticated": false, "user": null }
+    ],
+    "loginUrlTemplate": "https://.../auth/login?session_id=<mcp-session-id>"
+  }
+```
+
+#### Token lifetime
+
+Tokens are kept **in-memory** for the session's lifetime. They survive within a running pod but are lost on pod restart — each session must re-authenticate after a restart. The `loginUrl` in the 401 response makes re-authentication a single browser visit.
+
+#### Kubernetes deployment
 
 Uncomment the **Option A** block in `k8s/deployment.yaml` and set `AZURE_REDIRECT_URI` to your ingress hostname:
 
@@ -742,12 +782,14 @@ docker pull ghcr.io/DustHoff/msgraphmcp:latest
 
 ## Security Notes
 
-- **Token cache** (`tokens.json`) contains refresh tokens (delegated modes only). Written with `mode 0o600`; mount as a restricted Docker volume; do not bake into images.
+- **Per-session token isolation (Mode A):** each MCP session in HTTP mode holds its own in-memory token. Tokens are never shared between sessions — a compromised session cannot access another user's data. Tokens are lost on pod restart; re-authentication is a single browser visit via the `loginUrl` in the 401 response.
+- **Token cache file** (`tokens.json`) is only written in device-code (Mode D) and stdio mode. Written with `mode 0o600`; mount as a restricted Docker volume; do not bake into images.
 - The image runs as the **non-root `node` user** (see `Dockerfile`).
 - **Secrets** (`AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, certificate thumbprint) — use Kubernetes Secrets or an external vault; never commit real values to the repository.
 - **Prefer authorization code (Mode A) over device code (Mode D)** for HTTP deployments — tokens are tied to the user's browser device so CA compliance is evaluated correctly. Device code refresh from a non-enrolled container is rejected by device-compliance CA policies.
 - **Prefer client certificate (Mode C) over client secret (Mode B)** for app-only deployments — certificates are not transmitted over the wire and can be rotated without application downtime.
-- **Authorization code flow:** the `/auth/login` and `/auth/callback` endpoints must be reachable by the authenticating browser but do not need to be internet-facing — internal DNS is sufficient.
+- **Authorization code flow:** `/auth/login?session_id=<id>` and `/auth/callback` must be reachable by the authenticating browser but do not need to be internet-facing — internal DNS is sufficient. The `session_id` parameter is required; requests without a valid session ID are rejected with 400.
+- **Graph API logging** includes the authenticated user's UPN (`"user": "alice@contoso.com"`) in every log entry, making all MS Graph calls attributable to a specific user identity.
 - Scope down `GRAPH_SCOPES` (delegated modes) or grant only the required permissions (app-only modes) for your use case.
 - `wipe_managed_device` is irreversible — consider requiring explicit confirmation in your workflows.
 - See [`SECURITY-NOTICE.md`](SECURITY-NOTICE.md) for the full security assessment including dependency risk analysis.
