@@ -13,6 +13,7 @@ const DEBUG_RESPONSE_HEADERS = ['request-id', 'client-request-id', 'x-ms-ags-dia
 interface TimedRequestConfig extends InternalAxiosRequestConfig {
   _startMs?: number;
   _retried?: boolean;
+  _user?: string;
 }
 
 function pickHeaders(headers: Record<string, unknown> | undefined, keys: string[]): Record<string, unknown> {
@@ -28,13 +29,18 @@ function createAxiosInstance(baseURL: string, label: string, tokenManager: Token
   const http = axios.create({ baseURL, maxRedirects: 0 });
 
   http.interceptors.request.use(async (config: TimedRequestConfig) => {
-    const token = await tokenManager.getAccessToken();
+    const [token, accountInfo] = await Promise.all([
+      tokenManager.getAccessToken(),
+      tokenManager.getAccountInfo().catch(() => null),
+    ]);
     config.headers.Authorization = `Bearer ${token}`;
     config.headers['Content-Type'] = 'application/json';
     config._startMs = Date.now();
+    config._user = accountInfo?.upn ?? 'unknown';
 
     if (DEBUG) {
       logger.info(`${label} request`, {
+        user: config._user,
         method: config.method?.toUpperCase(),
         url: config.url,
         ...(config.params && { params: config.params }),
@@ -51,6 +57,7 @@ function createAxiosInstance(baseURL: string, label: string, tokenManager: Token
       const duration = cfg._startMs !== undefined ? Date.now() - cfg._startMs : undefined;
 
       logger.info(`${label} ok`, {
+        user: cfg._user,
         method: cfg.method?.toUpperCase(),
         url: cfg.url,
         status: res.status,
@@ -59,6 +66,7 @@ function createAxiosInstance(baseURL: string, label: string, tokenManager: Token
 
       if (DEBUG) {
         logger.info(`${label} response`, {
+          user: cfg._user,
           method: cfg.method?.toUpperCase(),
           url: cfg.url,
           status: res.status,
@@ -92,6 +100,7 @@ function createAxiosInstance(baseURL: string, label: string, tokenManager: Token
         ?.res?.responseUrl;
 
       logger.error(`${label} error`, {
+        user: cfg?._user,
         method: cfg?.method?.toUpperCase(),
         url: cfg?.url,
         ...(finalUrl && finalUrl !== `${baseURL}${cfg?.url}` && { finalUrl }),

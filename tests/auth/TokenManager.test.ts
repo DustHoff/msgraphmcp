@@ -133,6 +133,36 @@ describe('TokenManager', () => {
     expect(mockAcquireTokenByDeviceCode).toHaveBeenCalledTimes(1);
   });
 
+  it('getAccountInfo returns upn and name for authenticated delegated account', async () => {
+    const fakeAccount = { homeAccountId: 'id', environment: 'login.windows.net', tenantId: 'tid', username: 'alice@contoso.com', name: 'Alice' };
+    mockGetAllAccounts.mockResolvedValue([fakeAccount]);
+
+    const { TokenManager } = await import('../../src/auth/TokenManager');
+    const manager = new TokenManager();
+    const info = await manager.getAccountInfo();
+
+    expect(info).toEqual({ upn: 'alice@contoso.com', name: 'Alice' });
+  });
+
+  it('getAccountInfo returns null when no account is cached', async () => {
+    mockGetAllAccounts.mockResolvedValue([]);
+
+    const { TokenManager } = await import('../../src/auth/TokenManager');
+    const manager = new TokenManager();
+    const info = await manager.getAccountInfo();
+
+    expect(info).toBeNull();
+  });
+
+  it('getAccountInfo returns app-only for client-secret mode', async () => {
+    makeEnv({ AZURE_CLIENT_SECRET: 'my-secret' });
+    const { TokenManager } = await import('../../src/auth/TokenManager');
+    const manager = new TokenManager();
+    const info = await manager.getAccountInfo();
+
+    expect(info).toEqual({ upn: 'app-only', name: 'app-only' });
+  });
+
   it('throws when device code authentication returns no token', async () => {
     mockGetAllAccounts.mockResolvedValue([]);
     mockAcquireTokenByDeviceCode.mockResolvedValue(null);

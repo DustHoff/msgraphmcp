@@ -74,34 +74,31 @@ async function startStdio(graphClient: GraphClient, tokenManager: TokenManager):
 
 // ── HTTP / Streamable-HTTP mode (Kubernetes) ──────────────────────────────────
 
-async function startHttp(port: number): Promise<void> {
-  // Map of active sessions: sessionId → transport
-  const sessions = new Map<string, StreamableHTTPServerTransport>();
+interface SessionData {
+  transport: StreamableHTTPServerTransport;
+  tokenManager: TokenManager;
+  graphClient: GraphClient;
+}
 
-  // ── Auth-code mode: single global TokenManager with persistent cache ───────
-  // In authorization-code mode all sessions share one authenticated identity.
-  // The user signs in once via /auth/login; tokens are cached on disk.
-  //
-  // Device-code mode keeps per-session isolated in-memory caches to prevent
-  // delegated token bleed between concurrent users.
+async function startHttp(port: number): Promise<void> {
+  // Map of active sessions: sessionId → { transport, tokenManager, graphClient }
+  // Each session gets its own isolated token — no token bleed between users.
+  const sessions = new Map<string, SessionData>();
+
   const isAuthCodeMode = Boolean(process.env.AZURE_REDIRECT_URI && process.env.AZURE_CLIENT_SECRET);
   const REDIRECT_URI = process.env.AZURE_REDIRECT_URI ?? '';
 
-  let globalTokenManager: TokenManager | undefined;
-  let globalGraphClient: GraphClient | undefined;
-
   if (isAuthCodeMode) {
-    globalTokenManager = new TokenManager({ persistCache: true });
-    globalGraphClient = new GraphClient(globalTokenManager);
-    logger.info('auth mode: authorization-code (delegated)', {
+    logger.info('auth mode: authorization-code (delegated, per-session)', {
       redirectUri: REDIRECT_URI,
       loginUrl: REDIRECT_URI.replace('/auth/callback', '/auth/login'),
     });
   }
 
-  // Pending OAuth state: state-value → { codeVerifier }
+  // Pending OAuth state: state-value → { codeVerifier, sessionId }
+  // sessionId binds the OAuth callback to the exact MCP session that initiated the login.
   // Entries expire after 10 minutes to avoid unbounded growth.
-  const pendingAuth = new Map<string, { codeVerifier: string; expiresAt: number }>();
+  const pendingAuth = new Map<string, { codeVerifier: string; sessionId: string; expiresAt: number }>();
 
   function purgeStalePending() {
     const now = Date.now();
@@ -115,31 +112,63 @@ async function startHttp(port: number): Promise<void> {
 
     // ── Health/readiness probe ───────────────────────────────────────────────
     if (url.pathname === '/health') {
-      const authenticated = globalTokenManager
-        ? await globalTokenManager.isAuthenticated().catch(() => false)
-        : undefined;
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        status: 'ok',
-        service: 'msgraphmcp',
-        sessions: sessions.size,
-        authMode: globalTokenManager?.authMode ?? 'per-session',
-        ...(authenticated !== undefined && { authenticated }),
-        ...(isAuthCodeMode && !authenticated && {
-          loginUrl: REDIRECT_URI.replace('/auth/callback', '/auth/login'),
-        }),
-      }));
+      if (isAuthCodeMode) {
+        const sessionDetails = await Promise.all(
+          [...sessions.entries()].map(async ([id, s]) => {
+            const authenticated = await s.tokenManager.isAuthenticated().catch(() => false);
+            const accountInfo = authenticated
+              ? await s.tokenManager.getAccountInfo().catch(() => null)
+              : null;
+            return { sessionId: id, authenticated, user: accountInfo?.upn };
+          })
+        );
+        res.end(JSON.stringify({
+          status: 'ok',
+          service: 'msgraphmcp',
+          authMode: 'authorization-code',
+          sessions: sessions.size,
+          authenticatedSessions: sessionDetails.filter(s => s.authenticated).length,
+          sessionDetails,
+          loginUrlTemplate: `${REDIRECT_URI.replace('/auth/callback', '/auth/login')}?session_id=<mcp-session-id>`,
+        }));
+      } else {
+        const anySession = [...sessions.values()][0];
+        const authenticated = anySession
+          ? await anySession.tokenManager.isAuthenticated().catch(() => false)
+          : undefined;
+        res.end(JSON.stringify({
+          status: 'ok',
+          service: 'msgraphmcp',
+          sessions: sessions.size,
+          authMode: anySession?.tokenManager.authMode ?? 'per-session',
+          ...(authenticated !== undefined && { authenticated }),
+        }));
+      }
       return;
     }
 
     // ── OAuth Authorization Code: start flow ────────────────────────────────
-    // GET /auth/login  → redirects to Microsoft login page
+    // GET /auth/login?session_id=<mcp-session-id>  → redirects to Microsoft login page.
+    // The session_id binds this OAuth flow to a specific MCP session so its token
+    // is never shared with other sessions (multi-user isolation).
     // Prerequisites: AZURE_REDIRECT_URI + AZURE_CLIENT_SECRET env vars set.
-    // The redirect URI must be registered in the Entra ID app registration.
     if (url.pathname === '/auth/login') {
-      if (!isAuthCodeMode || !globalTokenManager) {
+      if (!isAuthCodeMode) {
         res.writeHead(400, { 'Content-Type': 'text/plain' });
         res.end('Authorization code mode not configured. Set AZURE_REDIRECT_URI and AZURE_CLIENT_SECRET.');
+        return;
+      }
+      const sessionId = url.searchParams.get('session_id');
+      const session = sessionId ? sessions.get(sessionId) : undefined;
+      if (!sessionId || !session) {
+        res.writeHead(400, { 'Content-Type': 'text/plain' });
+        res.end(
+          'session_id is required and must match an active MCP session.\n' +
+          'Connect your MCP client first; the session ID is returned in the mcp-session-id ' +
+          'response header, or in the loginUrl field of a 401 response from a tool call.\n\n' +
+          `Active sessions: ${sessions.size}`
+        );
         return;
       }
       try {
@@ -147,10 +176,10 @@ async function startHttp(port: number): Promise<void> {
         const codeVerifier = generateCodeVerifier();
         const codeChallenge = generateCodeChallenge(codeVerifier);
         const state = randomUUID();
-        pendingAuth.set(state, { codeVerifier, expiresAt: Date.now() + 10 * 60 * 1000 });
+        pendingAuth.set(state, { codeVerifier, sessionId, expiresAt: Date.now() + 10 * 60 * 1000 });
 
-        const authUrl = await globalTokenManager.getAuthCodeUrl(REDIRECT_URI, state, codeChallenge);
-        logger.info('auth: redirecting to microsoft login', { state });
+        const authUrl = await session.tokenManager.getAuthCodeUrl(REDIRECT_URI, state, codeChallenge);
+        logger.info('auth: redirecting to microsoft login', { state, sessionId });
         res.writeHead(302, { Location: authUrl });
         res.end();
       } catch (err) {
@@ -185,9 +214,22 @@ async function startHttp(port: number): Promise<void> {
 
       pendingAuth.delete(state!);
 
+      const session = sessions.get(pending.sessionId);
+      if (!session) {
+        res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(errorPage(
+          'MCP session has expired or disconnected. Please reconnect your MCP client and authenticate again.'
+        ));
+        return;
+      }
+
       try {
-        await globalTokenManager!.acquireTokenByAuthCode(code, REDIRECT_URI, pending.codeVerifier);
-        logger.info('auth: authorization code exchange successful');
+        await session.tokenManager.acquireTokenByAuthCode(code, REDIRECT_URI, pending.codeVerifier);
+        const accountInfo = await session.tokenManager.getAccountInfo().catch(() => null);
+        logger.info('auth: authorization code exchange successful', {
+          sessionId: pending.sessionId,
+          user: accountInfo?.upn,
+        });
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(successPage());
       } catch (err) {
@@ -206,26 +248,24 @@ async function startHttp(port: number): Promise<void> {
 
     try {
       const incomingSessionId = req.headers['mcp-session-id'] as string | undefined;
-      let transport = incomingSessionId ? sessions.get(incomingSessionId) : undefined;
+      const existingSession = incomingSessionId ? sessions.get(incomingSessionId) : undefined;
+      let transport = existingSession?.transport;
 
       // If the client provides a session ID that no longer exists (e.g. after a pod restart),
       // return 404 so the client knows to re-initialize rather than sending tool calls to a
       // brand-new uninitialised transport, which would yield "Server not initialized" errors.
-      if (incomingSessionId && !transport) {
+      if (incomingSessionId && !existingSession) {
         res.writeHead(404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Session not found', sessionId: incomingSessionId }));
         return;
       }
 
       if (!transport) {
-        // In auth-code mode all sessions share the global authenticated client.
-        // In device-code mode each session gets its own isolated in-memory cache.
-        const sessionTokenManager = isAuthCodeMode
-          ? globalTokenManager!
-          : new TokenManager({ persistCache: false });
-        const sessionGraphClient = isAuthCodeMode
-          ? globalGraphClient!
-          : new GraphClient(sessionTokenManager);
+        // Each MCP session gets its own isolated TokenManager and GraphClient.
+        // In auth-code mode this ensures tokens are never shared across users —
+        // each session authenticates independently via /auth/login?session_id=<id>.
+        const sessionTokenManager = new TokenManager({ persistCache: false });
+        const sessionGraphClient = new GraphClient(sessionTokenManager);
 
         let resolveSessionId: (id: string) => void;
         const sessionIdPromise = new Promise<string>((r) => { resolveSessionId = r; });
@@ -233,7 +273,7 @@ async function startHttp(port: number): Promise<void> {
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (id) => {
-            sessions.set(id, transport!);
+            sessions.set(id, { transport: transport!, tokenManager: sessionTokenManager, graphClient: sessionGraphClient });
             resolveSessionId(id);
             logger.info('mcp session opened', { sessionId: id, activeSessions: sessions.size });
           },
@@ -264,8 +304,11 @@ async function startHttp(port: number): Promise<void> {
 
     } catch (err) {
       if (err instanceof AuthRequiredError) {
-        const loginUrl = REDIRECT_URI.replace('/auth/callback', '/auth/login');
-        logger.warn('auth: unauthenticated mcp request', { loginUrl });
+        const baseLoginUrl = REDIRECT_URI.replace('/auth/callback', '/auth/login');
+        const loginUrl = incomingSessionId
+          ? `${baseLoginUrl}?session_id=${incomingSessionId}`
+          : baseLoginUrl;
+        logger.warn('auth: unauthenticated mcp request', { sessionId: incomingSessionId, loginUrl });
         if (!res.headersSent) {
           res.writeHead(401, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({

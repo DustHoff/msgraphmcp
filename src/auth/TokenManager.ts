@@ -289,4 +289,14 @@ export class TokenManager {
     const account = await this.getAccount();
     return account !== null;
   }
+
+  /** Returns the UPN and display name of the authenticated account, or null if not yet authenticated. */
+  async getAccountInfo(): Promise<{ upn: string; name: string } | null> {
+    if (this.authMode === 'client-secret' || this.authMode === 'client-certificate') {
+      return { upn: 'app-only', name: 'app-only' };
+    }
+    const account = await this.getAccount();
+    if (!account) return null;
+    return { upn: account.username, name: account.name ?? account.username };
+  }
 }

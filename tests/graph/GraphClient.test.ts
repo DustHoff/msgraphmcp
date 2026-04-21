@@ -43,6 +43,7 @@ describe('GraphClient', () => {
 
     const mockTokenManager = new (TokenManager as jest.MockedClass<typeof TokenManager>)();
     (mockTokenManager.getAccessToken as jest.Mock).mockResolvedValue('test-bearer-token');
+    (mockTokenManager.getAccountInfo as jest.Mock).mockResolvedValue({ upn: 'test@contoso.com', name: 'Test User' });
 
     client = new GraphClient(mockTokenManager);
 
@@ -66,6 +67,12 @@ describe('GraphClient', () => {
       const after = Date.now();
       expect(result._startMs).toBeGreaterThanOrEqual(before);
       expect(result._startMs).toBeLessThanOrEqual(after);
+    });
+
+    it('stamps _user UPN on the config', async () => {
+      const config: Record<string, unknown> = { headers: {} };
+      const result = await requestInterceptor(config);
+      expect(result._user).toBe('test@contoso.com');
     });
   });
 
