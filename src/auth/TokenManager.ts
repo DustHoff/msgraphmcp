@@ -13,30 +13,72 @@ import * as path from 'path';
 const TOKEN_CACHE_PATH = process.env.TOKEN_CACHE_PATH || '/data/tokens.json';
 
 const DEFAULT_SCOPES = [
+  // ── Identity & Users ────────────────────────────────────────────────────────
   'User.Read',
   'User.ReadWrite.All',
+  'User.ReadBasic.All',
+  'UserAuthenticationMethod.ReadWrite.All',
+
+  // ── Directory & Organisation ─────────────────────────────────────────────────
+  'Directory.ReadWrite.All',
+  'Directory.AccessAsUser.All',
+  'Organization.ReadWrite.All',
+  'AuditLog.Read.All',
+
+  // ── Groups ───────────────────────────────────────────────────────────────────
   'Group.ReadWrite.All',
   'GroupMember.ReadWrite.All',
+
+  // ── Mail ────────────────────────────────────────────────────────────────────
   'Mail.ReadWrite',
   'Mail.Send',
+  'MailboxSettings.ReadWrite',
+
+  // ── Calendar ─────────────────────────────────────────────────────────────────
   'Calendars.ReadWrite',
+  'OnlineMeetings.ReadWrite',
+  'Place.Read.All',
+
+  // ── Contacts ─────────────────────────────────────────────────────────────────
+  'Contacts.ReadWrite',
+  'People.Read.All',
+
+  // ── Files & Sites ────────────────────────────────────────────────────────────
   'Files.ReadWrite.All',
   'Sites.ReadWrite.All',
+  'Sites.Manage.All',
+
+  // ── Tasks & Notes ────────────────────────────────────────────────────────────
   'Tasks.ReadWrite',
-  'Contacts.ReadWrite',
-  // Teams: Team.ReadWrite.All does not exist as a delegated permission — use granular scopes
+  'Tasks.ReadWrite.Shared',
+  'Notes.ReadWrite.All',
+
+  // ── Teams & Channels ─────────────────────────────────────────────────────────
+  // Note: Team.ReadWrite.All does not exist as a delegated permission
   'Team.ReadBasic.All',
   'Team.Create',
+  'TeamSettings.ReadWrite.All',
   'TeamMember.ReadWrite.All',
   'Channel.ReadBasic.All',
   'Channel.Create',
   'Channel.Delete.All',
+  'ChannelMember.ReadWrite.All',
+  'ChannelMessage.Read.All',
   'ChannelMessage.Send',
-  'Directory.ReadWrite.All',
+  'Chat.ReadWrite',
+  'Presence.ReadWrite',
+
+  // ── Intune / Device Management ───────────────────────────────────────────────
   'DeviceManagementApps.ReadWrite.All',
   'DeviceManagementConfiguration.ReadWrite.All',
   'DeviceManagementManagedDevices.ReadWrite.All',
+  'DeviceManagementManagedDevices.PrivilegedOperations.All',
+  'DeviceManagementRBAC.ReadWrite.All',
   'DeviceManagementServiceConfig.ReadWrite.All',
+
+  // ── Reports ──────────────────────────────────────────────────────────────────
+  'Reports.Read.All',
+
   'offline_access',
 ];
 
