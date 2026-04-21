@@ -80,6 +80,9 @@ interface SessionData {
   graphClient: GraphClient;
 }
 
+// Maximum number of concurrent MCP sessions. Prevents OOM via session flooding.
+const MAX_SESSIONS = parseInt(process.env.MAX_SESSIONS ?? '50', 10);
+
 async function startHttp(port: number): Promise<void> {
   // Map of active sessions: sessionId → { transport, tokenManager, graphClient }
   // Each session gets its own isolated token — no token bleed between users.
@@ -111,26 +114,21 @@ async function startHttp(port: number): Promise<void> {
     const url = new URL(req.url ?? '/', `http://localhost:${port}`);
 
     // ── Health/readiness probe ───────────────────────────────────────────────
+    // Intentionally returns no session IDs, UPNs, or per-session detail —
+    // that data would let anyone reaching /health enumerate sessions and UPNs.
     if (url.pathname === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       if (isAuthCodeMode) {
-        const sessionDetails = await Promise.all(
-          [...sessions.entries()].map(async ([id, s]) => {
-            const authenticated = await s.tokenManager.isAuthenticated().catch(() => false);
-            const accountInfo = authenticated
-              ? await s.tokenManager.getAccountInfo().catch(() => null)
-              : null;
-            return { sessionId: id, authenticated, user: accountInfo?.upn };
-          })
+        const authStates = await Promise.all(
+          [...sessions.values()].map(s => s.tokenManager.isAuthenticated().catch(() => false))
         );
+        const authenticatedCount = authStates.filter(Boolean).length;
         res.end(JSON.stringify({
           status: 'ok',
           service: 'msgraphmcp',
           authMode: 'authorization-code',
           sessions: sessions.size,
-          authenticatedSessions: sessionDetails.filter(s => s.authenticated).length,
-          sessionDetails,
-          loginUrlTemplate: `${REDIRECT_URI.replace('/auth/callback', '/auth/login')}?session_id=<mcp-session-id>`,
+          authenticatedSessions: authenticatedCount,
         }));
       } else {
         const anySession = [...sessions.values()][0];
@@ -166,16 +164,32 @@ async function startHttp(port: number): Promise<void> {
         res.end(
           'session_id is required and must match an active MCP session.\n' +
           'Connect your MCP client first; the session ID is returned in the mcp-session-id ' +
-          'response header, or in the loginUrl field of a 401 response from a tool call.\n\n' +
-          `Active sessions: ${sessions.size}`
+          'response header, or in the loginUrl field of a tool call error.'
         );
         return;
       }
+
+      // Reject login attempts for already-authenticated sessions — prevents token
+      // replacement by an attacker who knows the session ID.
+      const alreadyAuthenticated = await session.tokenManager.isAuthenticated().catch(() => false);
+      if (alreadyAuthenticated) {
+        res.writeHead(409, { 'Content-Type': 'text/plain' });
+        res.end('Session is already authenticated. Disconnect and reconnect to start a new session.');
+        return;
+      }
+
       try {
         purgeStalePending();
         const codeVerifier = generateCodeVerifier();
         const codeChallenge = generateCodeChallenge(codeVerifier);
         const state = randomUUID();
+
+        // Cancel any existing pending auth for this session — prevents multiple
+        // simultaneous OAuth flows for the same session (e.g. user clicks login twice).
+        for (const [key, val] of pendingAuth) {
+          if (val.sessionId === sessionId) pendingAuth.delete(key);
+        }
+
         pendingAuth.set(state, { codeVerifier, sessionId, expiresAt: Date.now() + 10 * 60 * 1000 });
 
         const authUrl = await session.tokenManager.getAuthCodeUrl(REDIRECT_URI, state, codeChallenge);
@@ -261,6 +275,13 @@ async function startHttp(port: number): Promise<void> {
       }
 
       if (!transport) {
+        if (sessions.size >= MAX_SESSIONS) {
+          logger.warn('mcp session limit reached', { limit: MAX_SESSIONS, active: sessions.size });
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Service Unavailable', message: 'Maximum concurrent sessions reached. Try again later.' }));
+          return;
+        }
+
         // Each MCP session gets its own isolated TokenManager and GraphClient.
         // In auth-code mode this ensures tokens are never shared across users —
         // each session authenticates independently via /auth/login?session_id=<id>.
