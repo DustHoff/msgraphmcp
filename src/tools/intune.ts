@@ -757,15 +757,12 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
       roleScopeTagIds: z.array(z.string()).optional().describe('Scope tag ids to assign to this template'),
     },
     async ({ displayName, description, defaultLocale, brandingOptions, roleScopeTagIds }) => {
-      const body: Record<string, unknown> = {
-        '@odata.type': '#microsoft.graph.notificationMessageTemplate',
-        displayName,
-        defaultLocale,
-        brandingOptions,
-      };
+      const body: Record<string, unknown> = { displayName, defaultLocale, brandingOptions };
       if (description) body.description = description;
       if (roleScopeTagIds) body.roleScopeTagIds = roleScopeTagIds;
-      const template = await graph.post('/deviceManagement/notificationMessageTemplates', body);
+      // v1.0 routes to StatelessNotificationFEService (api-version=2023-12-04) which rejects all
+      // write ops with 400; beta uses a different internal routing that accepts them.
+      const template = await graph.beta.post('/deviceManagement/notificationMessageTemplates', body);
       return { content: [{ type: 'text', text: JSON.stringify(template, null, 2) }] };
     }
   );

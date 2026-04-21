@@ -269,16 +269,16 @@ describe('Intune Tools', () => {
   // ── Notification template tests ───────────────────────────────────────────
 
   describe('create_notification_template', () => {
-    it('posts template with required fields via v1.0', async () => {
-      graph.post.mockResolvedValue({ id: 'tmpl1', displayName: 'Test' });
+    it('posts template with required fields via beta (v1.0 StatelessNotificationFEService rejects writes)', async () => {
+      graph.beta.post.mockResolvedValue({ id: 'tmpl1', displayName: 'Test' });
       const result = await server.call('create_notification_template', {
         displayName: 'Device Non-Compliance',
         defaultLocale: 'en-US',
         brandingOptions: 'includeCompanyName',
       });
-      const [url, body] = args(graph.post);
+      const [url, body] = args(graph.beta.post);
       expect(url).toBe('/deviceManagement/notificationMessageTemplates');
-      expect(body['@odata.type']).toBe('#microsoft.graph.notificationMessageTemplate');
+      expect(body['@odata.type']).toBeUndefined();
       expect(body.displayName).toBe('Device Non-Compliance');
       expect(body.brandingOptions).toBe('includeCompanyName');
       expect(result.content[0].text).toContain('tmpl1');
