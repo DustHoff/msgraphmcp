@@ -40,6 +40,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # ── Build JS bundle natively (avoids esbuild crashing under QEMU) ──────
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: "npm"
+      - name: Install & bundle
+        run: npm ci --no-fund --silent && npm run build
+        env:
+          NPM_CONFIG_LOGLEVEL: error
+
       # ── Multi-platform builder ─────────────────────────────────────────────
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4

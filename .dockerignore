@@ -1,6 +1,5 @@
 # Dev artifacts
 node_modules/
-dist/
 coverage/
 *.log
 *.tsbuildinfo

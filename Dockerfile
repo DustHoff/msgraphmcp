@@ -1,15 +1,4 @@
-FROM node:20-alpine AS builder
-
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci --no-fund --silent
-
-COPY tsconfig.json ./
-COPY src ./src
-RUN npm run build     # esbuild → dist/index.js (57 kB, <1 s)
-
-# ── runtime stage ────────────────────────────────────────────────────────────
-FROM node:20-alpine AS runtime
+FROM node:20-alpine
 
 WORKDIR /app
 
@@ -19,7 +8,9 @@ RUN mkdir -p /data && chown node:node /data
 COPY package*.json ./
 RUN npm ci --omit=dev --no-fund --silent
 
-COPY --from=builder /app/dist ./dist
+# dist/ is pre-built by CI (esbuild runs natively on the CI runner, not under
+# QEMU emulation) and copied into the build context before docker build runs.
+COPY dist ./dist
 
 # Token cache lives at /data/tokens.json (override TOKEN_CACHE_PATH at runtime)
 VOLUME ["/data"]
