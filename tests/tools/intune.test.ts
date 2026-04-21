@@ -278,7 +278,7 @@ describe('Intune Tools', () => {
       });
       const [url, body] = args(graph.beta.post);
       expect(url).toBe('/deviceManagement/notificationMessageTemplates');
-      expect(body['@odata.type']).toBeUndefined();
+      expect(body['@odata.type']).toBe('#microsoft.graph.notificationMessageTemplate');
       expect(body.displayName).toBe('Device Non-Compliance');
       expect(body.brandingOptions).toBe('includeCompanyName');
       expect(result.content[0].text).toContain('tmpl1');
