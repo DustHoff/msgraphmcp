@@ -78,10 +78,15 @@ interface SessionData {
   transport: StreamableHTTPServerTransport;
   tokenManager: TokenManager;
   graphClient: GraphClient;
+  lastActivityAt: number;
 }
 
 // Maximum number of concurrent MCP sessions. Prevents OOM via session flooding.
 const MAX_SESSIONS = parseInt(process.env.MAX_SESSIONS ?? '50', 10);
+
+// Idle sessions are closed after this many minutes of inactivity (default 60).
+const SESSION_IDLE_TIMEOUT_MS =
+  parseInt(process.env.SESSION_IDLE_TIMEOUT_MINUTES ?? '60', 10) * 60 * 1000;
 
 async function startHttp(port: number): Promise<void> {
   // Map of active sessions: sessionId → { transport, tokenManager, graphClient }
@@ -102,6 +107,19 @@ async function startHttp(port: number): Promise<void> {
   // sessionId binds the OAuth callback to the exact MCP session that initiated the login.
   // Entries expire after 10 minutes to avoid unbounded growth.
   const pendingAuth = new Map<string, { codeVerifier: string; sessionId: string; expiresAt: number }>();
+
+  // Close sessions that have been idle longer than SESSION_IDLE_TIMEOUT_MS.
+  const idleCheckInterval = setInterval(() => {
+    const cutoff = Date.now() - SESSION_IDLE_TIMEOUT_MS;
+    for (const [id, session] of sessions) {
+      if (session.lastActivityAt < cutoff) {
+        logger.info('mcp session idle timeout — closing', { sessionId: id });
+        session.transport.close();
+        sessions.delete(id);
+      }
+    }
+  }, 5 * 60 * 1000);
+  idleCheckInterval.unref();
 
   function purgeStalePending() {
     const now = Date.now();
@@ -260,8 +278,8 @@ async function startHttp(port: number): Promise<void> {
       return;
     }
 
+    const incomingSessionId = req.headers['mcp-session-id'] as string | undefined;
     try {
-      const incomingSessionId = req.headers['mcp-session-id'] as string | undefined;
       const existingSession = incomingSessionId ? sessions.get(incomingSessionId) : undefined;
       let transport = existingSession?.transport;
 
@@ -303,7 +321,7 @@ async function startHttp(port: number): Promise<void> {
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (id) => {
             sessionId = id;
-            sessions.set(id, { transport: transport!, tokenManager: sessionTokenManager, graphClient: sessionGraphClient });
+            sessions.set(id, { transport: transport!, tokenManager: sessionTokenManager, graphClient: sessionGraphClient, lastActivityAt: Date.now() });
             resolveSessionId(id);
             logger.info('mcp session opened', { sessionId: id, activeSessions: sessions.size });
           },
@@ -331,6 +349,12 @@ async function startHttp(port: number): Promise<void> {
       // Parse body only for POST requests
       const body = req.method === 'POST' ? await parseBody(req) : undefined;
       await transport.handleRequest(req, res, body);
+
+      // Update last-activity timestamp so idle-timeout checker keeps the session alive.
+      if (incomingSessionId) {
+        const session = sessions.get(incomingSessionId);
+        if (session) session.lastActivityAt = Date.now();
+      }
 
     } catch (err) {
       if (err instanceof AuthRequiredError) {

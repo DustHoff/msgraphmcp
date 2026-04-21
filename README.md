@@ -230,6 +230,7 @@ Restart Claude Code after editing the config — the server appears in the MCP t
 | `PORT` | No | — | When set, the server listens on HTTP (Kubernetes mode); otherwise uses stdio |
 | `LOG_LEVEL` | No | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
 | `MAX_SESSIONS` | No | `50` | Maximum concurrent MCP sessions in HTTP mode. New connections beyond this limit receive HTTP 503. |
+| `SESSION_IDLE_TIMEOUT_MINUTES` | No | `60` | Minutes of inactivity before an MCP session is automatically closed and removed. |
 
 ---
 
