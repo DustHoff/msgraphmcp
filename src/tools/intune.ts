@@ -816,15 +816,12 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
 
   server.tool(
     'collect_device_diagnostics',
-    'Trigger the "Collect diagnostics" remote action on an Intune-managed device (beta API). Requires DeviceManagementManagedDevices.PrivilegedOperations.All. Use list_device_diagnostics to poll status and get the download URL once complete.',
+    'Trigger the "Collect diagnostics" remote action on an Intune-managed device (beta API). Returns a log collection request ID — use list_device_diagnostics to poll status and download_device_diagnostics to get the ZIP download URL once completed.',
     { deviceId: z.string().describe('Intune managed device ID') },
     async ({ deviceId }) => {
       const result = await graph.beta.post(
-        `/deviceManagement/managedDevices/executeAction`,
-        {
-          actionName: 'collectDiagnostics',
-          deviceIds: [deviceId],
-        }
+        `/deviceManagement/managedDevices('${deviceId}')/createDeviceLogCollectionRequest`,
+        { templateType: 'predefined' }
       );
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
@@ -835,29 +832,27 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'List log collection requests (diagnostic packages) for a specific Intune-managed device. Each entry contains the status (pending, completed, failed) and can be used with download_device_diagnostics once completed.',
     {
       deviceId: z.string().describe('Intune managed device ID'),
-      top: z.number().int().min(1).max(999).default(50),
+      requestId: z.string().optional().describe('Specific log collection request ID to check status of a single request'),
     },
-    async ({ deviceId, top }) => {
-      const diagnostics = await graph.get(
-        `/deviceManagement/managedDevices/${deviceId}/logCollectionRequests`,
-        { $top: top }
-      );
-      return { content: [{ type: 'text', text: JSON.stringify(diagnostics, null, 2) }] };
+    async ({ deviceId, requestId }) => {
+      const url = requestId
+        ? `/deviceManagement/managedDevices('${deviceId}')/logCollectionRequests('${requestId}')`
+        : `/deviceManagement/managedDevices('${deviceId}')/logCollectionRequests`;
+      const result = await graph.beta.get(url);
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
   );
 
   server.tool(
     'download_device_diagnostics',
-    'Get a time-limited SAS download URL for a completed diagnostic log package. Returns { value: "<url>" } — use the URL to download the ZIP archive.',
+    'Get a time-limited SAS download URL for a completed diagnostic log package. Returns { value: "<url>" } — use the URL to download the ZIP archive directly.',
     {
-      managedDeviceId: z.string().describe('Intune managed device ID'),
-      logCollectionId: z.string().describe('Log collection request ID from list_device_diagnostics'),
+      deviceId: z.string().describe('Intune managed device ID'),
+      requestId: z.string().describe('Log collection request ID from collect_device_diagnostics or list_device_diagnostics'),
     },
-    async ({ managedDeviceId, logCollectionId }) => {
-      // Graph API requires a detectedApp navigation path — use a placeholder that resolves
-      // to the correct resource via the managedDevice relationship.
-      const result = await graph.post(
-        `/deviceManagement/managedDevices/${managedDeviceId}/logCollectionRequests/${logCollectionId}/createDownloadUrl`,
+    async ({ deviceId, requestId }) => {
+      const result = await graph.beta.post(
+        `/deviceManagement/managedDevices('${deviceId}')/logCollectionRequests('${requestId}')/createDownloadUrl`,
         {}
       );
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
