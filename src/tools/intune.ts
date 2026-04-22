@@ -695,7 +695,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
         {
           templateType: {
             '@odata.type': 'microsoft.graph.deviceLogCollectionRequest',
-            templateType: 'predefinedDeviceComplianceScripts',
+            templateType: 'unknownFutureValue',
           },
         }
       );
