@@ -686,6 +686,135 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
   );
 
   server.tool(
+    'shutdown_managed_device',
+    'Shut down a managed Windows device.',
+    { deviceId: z.string() },
+    async ({ deviceId }) => {
+      await graph.post(`/deviceManagement/managedDevices/${deviceId}/shutDown`, {});
+      return { content: [{ type: 'text', text: `Shutdown triggered for device ${deviceId}.` }] };
+    }
+  );
+
+  server.tool(
+    'lock_managed_device',
+    'Remotely lock a managed device. The device will require a PIN/password to unlock.',
+    { deviceId: z.string() },
+    async ({ deviceId }) => {
+      await graph.post(`/deviceManagement/managedDevices/${deviceId}/remoteLock`, {});
+      return { content: [{ type: 'text', text: `Remote lock triggered for device ${deviceId}.` }] };
+    }
+  );
+
+  server.tool(
+    'set_managed_device_name',
+    'Rename a managed Windows device. The new name must be ≤15 characters and contain only letters, numbers, and hyphens.',
+    {
+      deviceId: z.string(),
+      deviceName: z.string().max(15).describe('New device name (max 15 chars, letters/numbers/hyphens)'),
+    },
+    async ({ deviceId, deviceName }) => {
+      await graph.post(`/deviceManagement/managedDevices/${deviceId}/setDeviceName`, { deviceName });
+      return { content: [{ type: 'text', text: `Device rename to "${deviceName}" triggered for device ${deviceId}.` }] };
+    }
+  );
+
+  server.tool(
+    'windows_defender_scan',
+    'Trigger a Windows Defender antivirus scan on a managed Windows device.',
+    {
+      deviceId: z.string(),
+      quickScan: z.boolean().default(true).describe('true = quick scan, false = full scan (takes longer)'),
+    },
+    async ({ deviceId, quickScan }) => {
+      await graph.post(`/deviceManagement/managedDevices/${deviceId}/windowsDefenderScan`, { quickScan });
+      return { content: [{ type: 'text', text: `Windows Defender ${quickScan ? 'quick' : 'full'} scan triggered for device ${deviceId}.` }] };
+    }
+  );
+
+  server.tool(
+    'windows_defender_update_signatures',
+    'Force a Windows Defender signature/definition update on a managed Windows device.',
+    { deviceId: z.string() },
+    async ({ deviceId }) => {
+      await graph.post(`/deviceManagement/managedDevices/${deviceId}/windowsDefenderUpdateSignatures`, {});
+      return { content: [{ type: 'text', text: `Defender signature update triggered for device ${deviceId}.` }] };
+    }
+  );
+
+  server.tool(
+    'rotate_bitlocker_keys',
+    'Rotate the BitLocker recovery key for a managed Windows device. The new key will be escrowed to Entra ID / Intune.',
+    { deviceId: z.string() },
+    async ({ deviceId }) => {
+      await graph.post(`/deviceManagement/managedDevices/${deviceId}/rotateBitLockerKeys`, {});
+      return { content: [{ type: 'text', text: `BitLocker key rotation triggered for device ${deviceId}.` }] };
+    }
+  );
+
+  server.tool(
+    'rotate_local_admin_password',
+    'Rotate the local administrator password (LAPS) for a managed Windows device. Requires Windows LAPS configured in Intune.',
+    { deviceId: z.string() },
+    async ({ deviceId }) => {
+      await graph.post(`/deviceManagement/managedDevices/${deviceId}/rotateLocalAdminPassword`, {});
+      return { content: [{ type: 'text', text: `Local admin password rotation triggered for device ${deviceId}.` }] };
+    }
+  );
+
+  server.tool(
+    'send_device_notification',
+    'Send a custom push notification to the Company Portal app on a managed device.',
+    {
+      deviceId: z.string(),
+      notificationTitle: z.string().describe('Notification title'),
+      notificationBody: z.string().describe('Notification body text'),
+    },
+    async ({ deviceId, notificationTitle, notificationBody }) => {
+      await graph.post(
+        `/deviceManagement/managedDevices/${deviceId}/sendCustomNotificationToCompanyPortal`,
+        { notificationTitle, notificationBody }
+      );
+      return { content: [{ type: 'text', text: `Notification sent to device ${deviceId}.` }] };
+    }
+  );
+
+  server.tool(
+    'disable_managed_device',
+    'Disable a managed device in Intune. The device will lose access to corporate resources but remains enrolled.',
+    { deviceId: z.string() },
+    async ({ deviceId }) => {
+      await graph.post(`/deviceManagement/managedDevices/${deviceId}/disable`, {});
+      return { content: [{ type: 'text', text: `Device ${deviceId} disabled.` }] };
+    }
+  );
+
+  server.tool(
+    'reenable_managed_device',
+    'Re-enable a previously disabled managed device in Intune.',
+    { deviceId: z.string() },
+    async ({ deviceId }) => {
+      await graph.post(`/deviceManagement/managedDevices/${deviceId}/reenable`, {});
+      return { content: [{ type: 'text', text: `Device ${deviceId} re-enabled.` }] };
+    }
+  );
+
+  server.tool(
+    'trigger_proactive_remediation',
+    'Trigger on-demand proactive remediation on a managed Windows device for a specific remediation script.',
+    {
+      deviceId: z.string(),
+      scriptId: z.string().describe('Proactive remediation script ID'),
+    },
+    async ({ deviceId, scriptId }) => {
+      await graph.post(
+        `/deviceManagement/managedDevices/${deviceId}/initiateOnDemandProactiveRemediation`,
+        { scriptPolicyId: scriptId }
+      );
+      return { content: [{ type: 'text', text: `Proactive remediation triggered on device ${deviceId} for script ${scriptId}.` }] };
+    }
+  );
+
+  server.tool(
     'collect_device_diagnostics',
     'Trigger the "Collect diagnostics" remote action on an Intune-managed device (beta API). Requires DeviceManagementManagedDevices.PrivilegedOperations.All. Use list_device_diagnostics to poll status and get the download URL once complete.',
     { deviceId: z.string().describe('Intune managed device ID') },
