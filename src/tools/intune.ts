@@ -690,11 +690,16 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'Trigger the "Collect diagnostics" remote action on an Intune-managed device (beta API). The device must be online and running Windows. Use list_device_diagnostics to poll status and get the download URL once complete.',
     { deviceId: z.string().describe('Intune managed device ID') },
     async ({ deviceId }) => {
-      await graph.beta.post(
-        `/deviceManagement/managedDevices/${deviceId}/collectDiagnostics`,
-        {}
+      const result = await graph.beta.post(
+        `/deviceManagement/managedDevices/${deviceId}/createDeviceLogCollectionRequest`,
+        {
+          templateType: {
+            '@odata.type': 'microsoft.graph.deviceLogCollectionRequest',
+            templateType: 'predefinedDeviceComplianceScripts',
+          },
+        }
       );
-      return { content: [{ type: 'text', text: `Diagnostic collection triggered for device ${deviceId}. Use list_device_diagnostics to poll status.` }] };
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
   );
 
