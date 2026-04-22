@@ -692,12 +692,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     async ({ deviceId }) => {
       const result = await graph.beta.post(
         `/deviceManagement/managedDevices/${deviceId}/createDeviceLogCollectionRequest`,
-        {
-          templateType: {
-            '@odata.type': 'microsoft.graph.deviceLogCollectionRequest',
-            templateType: 'unknownFutureValue',
-          },
-        }
+        {}
       );
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
