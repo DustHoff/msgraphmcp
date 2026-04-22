@@ -686,6 +686,58 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
   );
 
   server.tool(
+    'collect_device_diagnostics',
+    'Trigger collection of diagnostic logs on an Intune-managed device. The device must be online. Returns a log collection request object with an ID — use list_device_diagnostics to poll status and get the download URL once complete.',
+    { deviceId: z.string().describe('Intune managed device ID') },
+    async ({ deviceId }) => {
+      const result = await graph.post(
+        `/deviceManagement/managedDevices/${deviceId}/createDeviceLogCollectionRequest`,
+        {
+          templateType: {
+            '@odata.type': 'microsoft.graph.deviceLogCollectionRequest',
+            templateType: 'predefinedDeviceComplianceScripts',
+          },
+        }
+      );
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'list_device_diagnostics',
+    'List log collection requests (diagnostic packages) for a specific Intune-managed device. Each entry contains the status (pending, completed, failed) and can be used with download_device_diagnostics once completed.',
+    {
+      deviceId: z.string().describe('Intune managed device ID'),
+      top: z.number().int().min(1).max(999).default(50),
+    },
+    async ({ deviceId, top }) => {
+      const diagnostics = await graph.get(
+        `/deviceManagement/managedDevices/${deviceId}/logCollectionRequests`,
+        { $top: top }
+      );
+      return { content: [{ type: 'text', text: JSON.stringify(diagnostics, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'download_device_diagnostics',
+    'Get a time-limited SAS download URL for a completed diagnostic log package. Returns { value: "<url>" } — use the URL to download the ZIP archive.',
+    {
+      managedDeviceId: z.string().describe('Intune managed device ID'),
+      logCollectionId: z.string().describe('Log collection request ID from list_device_diagnostics'),
+    },
+    async ({ managedDeviceId, logCollectionId }) => {
+      // Graph API requires a detectedApp navigation path — use a placeholder that resolves
+      // to the correct resource via the managedDevice relationship.
+      const result = await graph.post(
+        `/deviceManagement/managedDevices/${managedDeviceId}/logCollectionRequests/${logCollectionId}/createDownloadUrl`,
+        {}
+      );
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.tool(
     'get_device_compliance_overview',
     'Get a tenant-wide compliance state overview across all managed devices.',
     {},
