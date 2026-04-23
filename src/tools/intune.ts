@@ -209,6 +209,47 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
   );
 
   server.tool(
+    'list_intune_app_relationships',
+    'List supersedence and dependency relationships of an Intune app.',
+    { appId: z.string() },
+    async ({ appId }) => {
+      const relationships = await graph.getAll(`/deviceAppManagement/mobileApps/${appId}/relationships`);
+      return { content: [{ type: 'text', text: JSON.stringify(relationships, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'set_intune_app_relationships',
+    'Set supersedence and/or dependency relationships for an Intune app. Replaces all existing relationships.',
+    {
+      appId: z.string(),
+      relationships: z.array(z.object({
+        '@odata.type': z.enum([
+          '#microsoft.graph.mobileAppSupersedence',
+          '#microsoft.graph.mobileAppDependency',
+        ]),
+        targetId: z.string().describe('Object id of the target app'),
+        supersedenceType: z.enum(['update', 'replace']).optional()
+          .describe('Required for supersedence: "update" keeps the old app, "replace" uninstalls it'),
+        dependencyType: z.enum(['detect', 'autoInstall']).optional()
+          .describe('Required for dependency: "detect" checks presence, "autoInstall" installs automatically'),
+      })).min(1),
+    },
+    async ({ appId, relationships }) => {
+      const body = {
+        relationships: relationships.map((r) => ({
+          '@odata.type': r['@odata.type'],
+          targetId: r.targetId,
+          ...(r.supersedenceType ? { supersedenceType: r.supersedenceType } : {}),
+          ...(r.dependencyType ? { dependencyType: r.dependencyType } : {}),
+        })),
+      };
+      await graph.post(`/deviceAppManagement/mobileApps/${appId}/updateRelationships`, body);
+      return { content: [{ type: 'text', text: `App ${appId}: ${relationships.length} relationship(s) set.` }] };
+    }
+  );
+
+  server.tool(
     'list_intune_app_assignments',
     'List group assignments of an Intune app.',
     { appId: z.string() },
