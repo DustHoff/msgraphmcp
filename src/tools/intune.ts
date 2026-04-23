@@ -4,29 +4,33 @@ import { GraphClient } from '../graph/GraphClient';
 
 // ─── shared helpers ──────────────────────────────────────────────────────────
 
-const detectionRuleSchema = z.object({
+// Win32 LOB app rules — field name in Graph API is "rules" (GET and PATCH),
+// each entry needs ruleType ("detection"|"requirement") plus type-specific fields.
+// Correct @odata.type values use the suffix "Rule", not "Detection".
+const win32LobAppRuleSchema = z.object({
   '@odata.type': z.string().describe(
-    'Detection rule type — one of: ' +
-    '#microsoft.graph.win32LobAppRegistryDetection | ' +
-    '#microsoft.graph.win32LobAppFileSystemDetection | ' +
-    '#microsoft.graph.win32LobAppProductCodeDetection | ' +
-    '#microsoft.graph.win32LobAppPowerShellScriptDetection'
+    'Rule type — one of: ' +
+    '#microsoft.graph.win32LobAppFileSystemRule | ' +
+    '#microsoft.graph.win32LobAppRegistryRule | ' +
+    '#microsoft.graph.win32LobAppProductCodeRule | ' +
+    '#microsoft.graph.win32LobAppPowerShellScriptRule'
   ),
-  // registry
-  keyPath: z.string().optional().describe('Registry key path (registry detection)'),
-  valueName: z.string().optional().describe('Registry value name (registry detection)'),
+  ruleType: z.enum(['detection', 'requirement']).default('detection'),
   // file system
-  path: z.string().optional().describe('Folder path (file system detection)'),
-  fileOrFolderName: z.string().optional().describe('File or folder name (file system detection)'),
-  // shared by registry + file system
+  path: z.string().optional().describe('Folder path (file system rule)'),
+  fileOrFolderName: z.string().optional().describe('File or folder name (file system rule)'),
+  // registry
+  keyPath: z.string().optional().describe('Registry key path (registry rule)'),
+  valueName: z.string().optional().describe('Registry value name (registry rule)'),
+  // shared by file system + registry
   check32BitOn64System: z.boolean().optional(),
-  detectionType: z.string().optional().describe(
-    'e.g. exists | doesNotExist | string | integer | version | sizeInMB | lastModifiedDate'
+  operationType: z.string().optional().describe(
+    'e.g. notConfigured | exists | doesNotExist | string | integer | version | sizeInMB'
   ),
   operator: z.string().optional().describe(
     'e.g. notConfigured | equal | notEqual | greaterThan | greaterThanOrEqual | lessThan | lessThanOrEqual'
   ),
-  detectionValue: z.string().optional(),
+  comparisonValue: z.string().optional(),
   // MSI product code
   productCode: z.string().optional().describe('MSI product GUID'),
   productVersionOperator: z.string().optional(),
@@ -164,7 +168,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
 
   server.tool(
     'update_intune_app',
-    'Update properties of an existing Intune app. For Win32 LOB apps the "rules" field sets detection rules.',
+    'Update properties of an existing Intune app. For Win32 LOB apps use "rules" to replace detection/requirement rules.',
     {
       appId: z.string(),
       displayName: z.string().optional(),
@@ -174,16 +178,16 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
       privacyInformationUrl: z.string().url().optional(),
       informationUrl: z.string().url().optional(),
       notes: z.string().optional(),
-      detectionRules: z.array(detectionRuleSchema).optional()
-        .describe('Detection rules for Win32 LOB apps (replaces all existing rules)'),
+      rules: z.array(win32LobAppRuleSchema).optional()
+        .describe('Detection/requirement rules for Win32 LOB apps (replaces all existing rules). Graph API field name is "rules".'),
     },
-    async ({ appId, detectionRules, ...props }) => {
+    async ({ appId, rules, ...props }) => {
       const body: Record<string, unknown> = Object.fromEntries(
         Object.entries(props).filter(([, v]) => v !== undefined)
       );
-      if (detectionRules !== undefined) {
-        body.detectionRules = detectionRules;
-        // Graph API requires @odata.type on the app body when patching derived-type properties
+      if (rules !== undefined) {
+        body.rules = rules;
+        // Graph API requires @odata.type on the app body when patching win32LobApp-specific fields
         body['@odata.type'] = '#microsoft.graph.win32LobApp';
       }
       await graph.patch(`/deviceAppManagement/mobileApps/${appId}`, body);
