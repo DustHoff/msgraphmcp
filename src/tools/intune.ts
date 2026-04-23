@@ -4,6 +4,39 @@ import { GraphClient } from '../graph/GraphClient';
 
 // ─── shared helpers ──────────────────────────────────────────────────────────
 
+const detectionRuleSchema = z.object({
+  '@odata.type': z.string().describe(
+    'Detection rule type — one of: ' +
+    '#microsoft.graph.win32LobAppRegistryDetection | ' +
+    '#microsoft.graph.win32LobAppFileSystemDetection | ' +
+    '#microsoft.graph.win32LobAppProductCodeDetection | ' +
+    '#microsoft.graph.win32LobAppPowerShellScriptDetection'
+  ),
+  // registry
+  keyPath: z.string().optional().describe('Registry key path (registry detection)'),
+  valueName: z.string().optional().describe('Registry value name (registry detection)'),
+  // file system
+  path: z.string().optional().describe('Folder path (file system detection)'),
+  fileOrFolderName: z.string().optional().describe('File or folder name (file system detection)'),
+  // shared by registry + file system
+  check32BitOn64System: z.boolean().optional(),
+  detectionType: z.string().optional().describe(
+    'e.g. exists | doesNotExist | string | integer | version | sizeInMB | lastModifiedDate'
+  ),
+  operator: z.string().optional().describe(
+    'e.g. notConfigured | equal | notEqual | greaterThan | greaterThanOrEqual | lessThan | lessThanOrEqual'
+  ),
+  detectionValue: z.string().optional(),
+  // MSI product code
+  productCode: z.string().optional().describe('MSI product GUID'),
+  productVersionOperator: z.string().optional(),
+  productVersion: z.string().optional(),
+  // PowerShell script
+  enforceSignatureCheck: z.boolean().optional(),
+  runAs32Bit: z.boolean().optional(),
+  scriptContent: z.string().optional().describe('Base64-encoded PowerShell script content'),
+});
+
 const groupAssignmentSchema = z.object({
   groupId: z.string().describe('Azure AD group object id'),
   intent: z.enum(['available', 'required', 'uninstall', 'availableWithoutEnrollment'])
@@ -131,7 +164,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
 
   server.tool(
     'update_intune_app',
-    'Update properties of an existing Intune app.',
+    'Update properties of an existing Intune app. For Win32 LOB apps the "rules" field sets detection rules.',
     {
       appId: z.string(),
       displayName: z.string().optional(),
@@ -141,6 +174,8 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
       privacyInformationUrl: z.string().url().optional(),
       informationUrl: z.string().url().optional(),
       notes: z.string().optional(),
+      rules: z.array(detectionRuleSchema).optional()
+        .describe('Detection rules for Win32 LOB apps (replaces all existing rules)'),
     },
     async ({ appId, ...props }) => {
       const body = Object.fromEntries(Object.entries(props).filter(([, v]) => v !== undefined));
