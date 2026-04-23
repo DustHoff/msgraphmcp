@@ -39,7 +39,7 @@ const win32LobAppRuleSchema = z.object({
   enforceSignatureCheck: z.boolean().optional(),
   runAs32Bit: z.boolean().optional(),
   scriptContent: z.string().optional().describe('Base64-encoded PowerShell script content'),
-});
+}).passthrough(); // keep any extra fields the caller provides (e.g. detectionType, detectionValue)
 
 const groupAssignmentSchema = z.object({
   groupId: z.string().describe('Azure AD group object id'),
@@ -189,6 +189,9 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
         body.rules = rules;
         // Graph API requires @odata.type on the app body when patching win32LobApp-specific fields
         body['@odata.type'] = '#microsoft.graph.win32LobApp';
+      }
+      if (Object.keys(body).length === 0) {
+        return { content: [{ type: 'text', text: 'No fields provided — nothing to update.' }] };
       }
       await graph.patch(`/deviceAppManagement/mobileApps/${appId}`, body);
       return { content: [{ type: 'text', text: `App ${appId} updated.` }] };
