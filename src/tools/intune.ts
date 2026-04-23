@@ -1,6 +1,98 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import * as fs from 'node:fs';
+import AdmZip from 'adm-zip';
+import axios from 'axios';
 import { GraphClient } from '../graph/GraphClient';
+
+// ─── Win32 LOB upload helpers ─────────────────────────────────────────────────
+
+interface IntuneWinInfo {
+  fileName: string;
+  unencryptedSize: number;
+  encryptedContent: Buffer;
+  encryptionKey: string;
+  macKey: string;
+  initializationVector: string;
+  mac: string;
+  fileDigest: string;
+  fileDigestAlgorithm: string;
+}
+
+function xmlValue(xml: string, tag: string): string {
+  return xml.match(new RegExp(`<${tag}[^>]*>([^<]*)<\/${tag}>`))?.[1]?.trim() ?? '';
+}
+
+function parseIntuneWin(filePath: string): IntuneWinInfo {
+  if (!fs.existsSync(filePath)) throw new Error(`File not found: ${filePath}`);
+  const zip = new AdmZip(filePath);
+
+  const detectionEntry = zip.getEntry('IntuneWinPackage/Metadata/Detection.xml');
+  if (!detectionEntry) throw new Error('.intunewin missing IntuneWinPackage/Metadata/Detection.xml');
+  const xml = detectionEntry.getData().toString('utf8');
+
+  const contentEntry = zip.getEntries().find(
+    e => e.entryName.startsWith('IntuneWinPackage/Contents/') && e.entryName.endsWith('.intunewin'),
+  );
+  if (!contentEntry) throw new Error('.intunewin missing encrypted content in IntuneWinPackage/Contents/');
+
+  return {
+    fileName: xmlValue(xml, 'FileName'),
+    unencryptedSize: parseInt(xmlValue(xml, 'UnencryptedContentSize'), 10),
+    encryptedContent: contentEntry.getData(),
+    encryptionKey: xmlValue(xml, 'EncryptionKey'),
+    macKey: xmlValue(xml, 'MacKey'),
+    initializationVector: xmlValue(xml, 'InitializationVector'),
+    mac: xmlValue(xml, 'Mac'),
+    fileDigest: xmlValue(xml, 'FileDigest'),
+    fileDigestAlgorithm: xmlValue(xml, 'FileDigestAlgorithm') || 'SHA256',
+  };
+}
+
+const BLOB_BLOCK_SIZE = 4 * 1024 * 1024; // 4 MB per block
+
+async function uploadBlobBlocks(sasUri: string, data: Buffer): Promise<void> {
+  const blockIds: string[] = [];
+  const blockCount = Math.ceil(data.length / BLOB_BLOCK_SIZE);
+
+  for (let i = 0; i < blockCount; i++) {
+    const blockId = Buffer.from(String(i).padStart(6, '0')).toString('base64');
+    blockIds.push(blockId);
+    await axios.put(
+      `${sasUri}&comp=block&blockid=${encodeURIComponent(blockId)}`,
+      data.subarray(i * BLOB_BLOCK_SIZE, Math.min((i + 1) * BLOB_BLOCK_SIZE, data.length)),
+      { headers: { 'Content-Type': 'application/octet-stream' }, maxBodyLength: Infinity },
+    );
+  }
+
+  const blockListXml = `<?xml version="1.0" encoding="utf-8"?><BlockList>${
+    blockIds.map(b => `<Latest>${b}</Latest>`).join('')
+  }</BlockList>`;
+  await axios.put(`${sasUri}&comp=blocklist`, blockListXml, {
+    headers: { 'Content-Type': 'application/xml' },
+  });
+}
+
+async function pollContentFile(
+  graph: GraphClient,
+  appId: string,
+  versionId: string,
+  fileId: string,
+  until: (state: string) => boolean,
+  timeoutMs = 180_000,
+): Promise<Record<string, unknown>> {
+  const FAIL_STATES = ['Failed', 'TimedOut', 'Error'];
+  const url = `/deviceAppManagement/mobileApps/${appId}/microsoft.graph.win32LobApp/contentVersions/${versionId}/files/${fileId}`;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 3000));
+    const file = await graph.get<Record<string, unknown>>(url);
+    const state = (file.uploadState as string) ?? '';
+    if (until(state)) return file;
+    if (FAIL_STATES.some(s => state.includes(s))) throw new Error(`Upload failed: uploadState=${state}`);
+  }
+  throw new Error('Timed out waiting for file upload state');
+}
 
 // ─── shared helpers ──────────────────────────────────────────────────────────
 
@@ -205,6 +297,145 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     async ({ appId }) => {
       await graph.delete(`/deviceAppManagement/mobileApps/${appId}`);
       return { content: [{ type: 'text', text: `App ${appId} deleted.` }] };
+    }
+  );
+
+  server.tool(
+    'upload_win32_lob_app',
+    'Upload a Win32 LOB app (.intunewin file) to Intune. ' +
+    'The .intunewin file must be accessible on the server filesystem — place it under /data (shared PVC). ' +
+    'After upload, set detection rules via update_intune_app and assign groups via assign_intune_app.',
+    {
+      filePath: z.string()
+        .describe('Absolute path to the .intunewin file on the server, e.g. /data/myapp.intunewin'),
+      displayName: z.string(),
+      publisher: z.string(),
+      description: z.string().optional(),
+      installCommandLine: z.string()
+        .describe('Install command, e.g. "setup.exe /S" or "msiexec /i app.msi /qn"'),
+      uninstallCommandLine: z.string()
+        .describe('Uninstall command, e.g. "msiexec /x {GUID} /qn"'),
+      setupFilePath: z.string()
+        .describe('Name of the main installer file inside the package, e.g. "setup.exe" or "app.msi"'),
+      applicableArchitectures: z.string().default('x64')
+        .describe('Comma-separated architectures, e.g. "x64" or "x86,x64"'),
+      minimumSupportedWindowsRelease: z.string().default('1607')
+        .describe('Minimum Windows 10/11 feature release, e.g. "1607" or "21H2"'),
+      runAsAccount: z.enum(['system', 'user']).default('system'),
+      deviceRestartBehavior: z.enum(['allow', 'basedOnReturnCode', 'suppress', 'force']).default('allow'),
+    },
+    async ({
+      filePath, displayName, publisher, description,
+      installCommandLine, uninstallCommandLine, setupFilePath,
+      applicableArchitectures, minimumSupportedWindowsRelease,
+      runAsAccount, deviceRestartBehavior,
+    }) => {
+      // ① Parse .intunewin — extract Detection.xml metadata + encrypted content blob
+      const info = parseIntuneWin(filePath);
+
+      // ② Create Win32LobApp metadata entry
+      const app = await graph.post<{ id: string }>('/deviceAppManagement/mobileApps', {
+        '@odata.type': '#microsoft.graph.win32LobApp',
+        displayName,
+        publisher,
+        ...(description && { description }),
+        fileName: info.fileName,
+        installCommandLine,
+        uninstallCommandLine,
+        setupFilePath,
+        applicableArchitectures,
+        minimumSupportedWindowsRelease,
+        installExperience: {
+          '@odata.type': '#microsoft.graph.win32LobAppInstallExperience',
+          runAsAccount,
+          deviceRestartBehavior,
+        },
+        returnCodes: [
+          { returnCode: 0, type: 'success' },
+          { returnCode: 1707, type: 'success' },
+          { returnCode: 3010, type: 'softReboot' },
+          { returnCode: 1641, type: 'hardReboot' },
+          { returnCode: 1618, type: 'retry' },
+        ],
+        rules: [],
+      });
+
+      try {
+        // ③ Create content version
+        const version = await graph.post<{ id: string }>(
+          `/deviceAppManagement/mobileApps/${app.id}/microsoft.graph.win32LobApp/contentVersions`,
+          {},
+        );
+
+        // ④ Create file entry — triggers Azure Storage URI allocation
+        const fileEntry = await graph.post<{ id: string }>(
+          `/deviceAppManagement/mobileApps/${app.id}/microsoft.graph.win32LobApp/contentVersions/${version.id}/files`,
+          {
+            '@odata.type': '#microsoft.graph.mobileAppContentFile',
+            name: info.fileName,
+            size: info.unencryptedSize,
+            sizeEncrypted: info.encryptedContent.length,
+            manifest: null,
+            isDependency: false,
+          },
+        );
+
+        // ⑤ Poll until azureStorageUri is ready
+        const fileReady = await pollContentFile(
+          graph, app.id, version.id, fileEntry.id,
+          s => s === 'azureStorageUriRequestSuccess',
+        );
+        const sasUri = fileReady.azureStorageUri as string;
+        if (!sasUri) throw new Error('Azure Storage URI not provided by Graph API');
+
+        // ⑥ Upload encrypted content to Azure Blob in 4 MB blocks
+        await uploadBlobBlocks(sasUri, info.encryptedContent);
+
+        // ⑦ Commit file with encryption metadata
+        await graph.post(
+          `/deviceAppManagement/mobileApps/${app.id}/microsoft.graph.win32LobApp/contentVersions/${version.id}/files/${fileEntry.id}/commit`,
+          {
+            fileEncryptionInfo: {
+              encryptionKey: info.encryptionKey,
+              initializationVector: info.initializationVector,
+              mac: info.mac,
+              macKey: info.macKey,
+              profileIdentifier: 'ProfileVersion1',
+              fileDigest: info.fileDigest,
+              fileDigestAlgorithm: info.fileDigestAlgorithm,
+            },
+          },
+        );
+
+        // ⑧ Poll until commit is confirmed
+        await pollContentFile(
+          graph, app.id, version.id, fileEntry.id,
+          s => s === 'commitFileSuccess',
+          300_000, // 5 min — large files take time
+        );
+
+        // ⑨ Link committed content version to the app
+        await graph.patch(`/deviceAppManagement/mobileApps/${app.id}`, {
+          '@odata.type': '#microsoft.graph.win32LobApp',
+          committedContentVersion: version.id,
+        });
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              appId: app.id,
+              contentVersionId: version.id,
+              fileName: info.fileName,
+              message: `"${displayName}" uploaded. Next: set detection rules via update_intune_app, then assign groups via assign_intune_app.`,
+            }, null, 2),
+          }],
+        };
+      } catch (err) {
+        // Remove the shell app entry so there is no orphaned app without content
+        await graph.delete(`/deviceAppManagement/mobileApps/${app.id}`).catch(() => {});
+        throw err;
+      }
     }
   );
 
