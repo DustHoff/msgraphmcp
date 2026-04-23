@@ -174,11 +174,18 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
       privacyInformationUrl: z.string().url().optional(),
       informationUrl: z.string().url().optional(),
       notes: z.string().optional(),
-      rules: z.array(detectionRuleSchema).optional()
+      detectionRules: z.array(detectionRuleSchema).optional()
         .describe('Detection rules for Win32 LOB apps (replaces all existing rules)'),
     },
-    async ({ appId, ...props }) => {
-      const body = Object.fromEntries(Object.entries(props).filter(([, v]) => v !== undefined));
+    async ({ appId, detectionRules, ...props }) => {
+      const body: Record<string, unknown> = Object.fromEntries(
+        Object.entries(props).filter(([, v]) => v !== undefined)
+      );
+      if (detectionRules !== undefined) {
+        body.detectionRules = detectionRules;
+        // Graph API requires @odata.type on the app body when patching derived-type properties
+        body['@odata.type'] = '#microsoft.graph.win32LobApp';
+      }
       await graph.patch(`/deviceAppManagement/mobileApps/${appId}`, body);
       return { content: [{ type: 'text', text: `App ${appId} updated.` }] };
     }
