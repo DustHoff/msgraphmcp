@@ -780,6 +780,121 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
   );
 
   server.tool(
+    'update_win32_lob_app_content',
+    'Replace the package content of an existing Intune Win32 LOB app with a new ' +
+    '.intunewin. Creates a new contentVersion on the existing app, uploads the ' +
+    'encrypted content (encryption info is taken from the .intunewin Detection.xml), ' +
+    'commits it, and patches committedContentVersion. ' +
+    'Provide exactly one source: filePath (absolute path on the server), fileUrl ' +
+    '(HTTP/HTTPS URL the server downloads), or a OneDrive reference ' +
+    '(oneDriveItemPath or oneDriveItemId, optionally with oneDriveUserId — defaults to "me").',
+    {
+      appId: z.string().describe('Object id of the existing #microsoft.graph.win32LobApp in Intune.'),
+      filePath: z.string().optional()
+        .describe('Absolute path to the .intunewin file on the server, e.g. /data/myapp.intunewin'),
+      fileUrl: z.string().url().optional()
+        .describe('HTTP/HTTPS URL of the .intunewin — the server will download it before uploading'),
+      oneDriveUserId: z.string().optional()
+        .describe('OneDrive owner — user id or "me" (default). Used with oneDriveItemPath/oneDriveItemId.'),
+      oneDriveItemPath: z.string().optional()
+        .describe('Path of the .intunewin file in OneDrive, e.g. "/Apps/myapp.intunewin"'),
+      oneDriveItemId: z.string().optional()
+        .describe('OneDrive DriveItem id of the .intunewin (alternative to oneDriveItemPath)'),
+    },
+    async ({ appId, filePath, fileUrl, oneDriveUserId, oneDriveItemPath, oneDriveItemId }) => {
+      const hasOneDrive = Boolean(oneDriveItemPath || oneDriveItemId);
+      const sourceCount = [Boolean(filePath), Boolean(fileUrl), hasOneDrive].filter(Boolean).length;
+      if (sourceCount === 0) {
+        throw new Error('Provide one of filePath, fileUrl, or oneDriveItemPath/oneDriveItemId.');
+      }
+      if (sourceCount > 1) {
+        throw new Error('Provide only one source: filePath, fileUrl, or a OneDrive reference.');
+      }
+      if (oneDriveItemPath && oneDriveItemId) {
+        throw new Error('Provide either oneDriveItemPath or oneDriveItemId, not both.');
+      }
+
+      // Verify target app is actually a win32LobApp — this tool is not a fit for
+      // MSIX, webApp, or store apps (different content flow or no content at all).
+      // Fetch without $select — the `@odata.type` discriminator is only returned
+      // on the full entity projection.
+      const existing = await graph.get<Record<string, unknown>>(
+        `/deviceAppManagement/mobileApps/${encodeId(appId)}`,
+      );
+      const actualType = existing['@odata.type'] as string | undefined;
+      if (actualType !== '#microsoft.graph.win32LobApp') {
+        throw new Error(
+          `App ${appId} is ${actualType ?? 'of unknown type'}, not #microsoft.graph.win32LobApp. ` +
+          `update_win32_lob_app_content only updates Win32 LOB apps.`,
+        );
+      }
+      const appDisplayName = existing.displayName as string | undefined;
+
+      let tmpPath: string | undefined;
+      if (fileUrl) {
+        tmpPath = await downloadToTempFile(fileUrl);
+        filePath = tmpPath;
+      } else if (hasOneDrive) {
+        ({ tmpPath } = await downloadOneDriveItemToTempFile(
+          graph,
+          oneDriveUserId ?? 'me',
+          oneDriveItemPath,
+          oneDriveItemId,
+        ));
+        filePath = tmpPath;
+      }
+      logger.info('win32 update: parsing .intunewin', { filePath });
+      const info = parseIntuneWin(filePath!);
+      logger.info('win32 update: parsed', {
+        fileName: info.fileName,
+        unencryptedSize: info.unencryptedSize,
+        encryptedBytes: info.encryptedContent.length,
+      });
+
+      try {
+        const versionId = await uploadAppContentVersion(
+          graph,
+          appId,
+          'microsoft.graph.win32LobApp',
+          info.encryptedContent,
+          info.fileName,
+          info.unencryptedSize,
+          {
+            encryptionKey: info.encryptionKey,
+            initializationVector: info.initializationVector,
+            mac: info.mac,
+            macKey: info.macKey,
+            profileIdentifier: 'ProfileVersion1',
+            fileDigest: info.fileDigest,
+            fileDigestAlgorithm: info.fileDigestAlgorithm,
+          },
+        );
+
+        await graph.patch(`/deviceAppManagement/mobileApps/${encodeId(appId)}`, {
+          '@odata.type': '#microsoft.graph.win32LobApp',
+          committedContentVersion: versionId,
+        });
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              appId,
+              displayName: appDisplayName,
+              committedContentVersion: versionId,
+              fileName: info.fileName,
+              sizeBytes: info.unencryptedSize,
+              message: `Win32 LOB app content updated to contentVersion ${versionId}.`,
+            }, null, 2),
+          }],
+        };
+      } finally {
+        if (tmpPath) fs.unlink(tmpPath, () => {});
+      }
+    }
+  );
+
+  server.tool(
     'update_windows_msix_app_content',
     'Replace the package content of an existing Intune MSIX / windowsUniversalAppX app ' +
     'with a new .msix. Creates a new contentVersion on the existing app, streams the ' +
