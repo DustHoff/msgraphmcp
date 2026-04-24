@@ -540,18 +540,16 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
 
   server.tool(
     'get_intune_app_install_status',
-    'Get device/user install status for an Intune app. ' +
-    'Automatically routes to the right API based on app type: ' +
-    'Win32/MSI/iOS/Android LOB & Store apps use the deviceStatuses navigation property (array of status objects); ' +
-    'MSIX/AppX, WinGet, webApp and all other types use the Intune Reports API ' +
-    '(returns { schema, values } rows — note different shape). ' +
-    'Always includes an installSummary with aggregate counts (installed/failed/pending/notInstalled/notApplicable). ' +
-    'Optionally returns per-user statuses for Win32/MSI/iOS/Android types.',
+    'Get per-device install status for an Intune app (all types: Win32, MSI, MSIX, iOS, Android, macOS, WinGet, webApp, etc.). ' +
+    'Uses the Intune Reports API (v1.0 retrieveDeviceAppInstallationStatusReport action) which works for all app types. ' +
+    'Response contains deviceInstallStatusReport with Schema + Values (column-based rows) including DeviceName, InstallState, InstallStateDetail, ErrorCode. ' +
+    'Optionally returns per-user aggregate statuses. ' +
+    'Also attempts to fetch an installSummary (aggregate counts) where available.',
     {
       appId: z.string(),
       top: z.number().int().min(1).max(200).default(25),
       includeUserStatuses: z.boolean().default(false)
-        .describe('Also return per-user install states (Win32/MSI/iOS/Android LOB+Store apps only)'),
+        .describe('Also return per-user aggregate install states'),
     },
     async ({ appId, top, includeUserStatuses }) => {
       const app = await graph.get<Record<string, unknown>>(
@@ -559,29 +557,6 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
         { $select: 'id,displayName,publishingState' }
       );
       const odataType = (app['@odata.type'] as string) ?? '';
-
-      // App types that expose the deviceStatuses navigation property in Graph API v1.0.
-      // windowsUniversalAppX / windowsAppX / winGetApp / webApp and newer store types do NOT.
-      const SUPPORTS_DEVICE_STATUSES = new Set([
-        '#microsoft.graph.win32LobApp',
-        '#microsoft.graph.windowsMobileMSI',
-        '#microsoft.graph.iosStoreApp',
-        '#microsoft.graph.iosLobApp',
-        '#microsoft.graph.iosVppApp',
-        '#microsoft.graph.androidStoreApp',
-        '#microsoft.graph.androidLobApp',
-        '#microsoft.graph.androidForWorkApp',
-        '#microsoft.graph.managedIOSStoreApp',
-        '#microsoft.graph.managedAndroidStoreApp',
-        '#microsoft.graph.managedIOSLobApp',
-        '#microsoft.graph.managedAndroidLobApp',
-        '#microsoft.graph.microsoftStoreForBusinessApp',
-        '#microsoft.graph.macOSLobApp',
-        '#microsoft.graph.macOSOfficeSuiteApp',
-        '#microsoft.graph.macOSMicrosoftEdgeApp',
-        '#microsoft.graph.macOSDmgApp',
-        '#microsoft.graph.macOSPkgApp',
-      ]);
 
       const result: Record<string, unknown> = {
         app: {
@@ -592,60 +567,37 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
         },
       };
 
-      // deviceStatuses / userStatuses require the OData type-cast segment in the URL,
-      // exactly like contentVersions does for win32LobApp uploads.
-      // Only attempt for types that expose this navigation (LOB/store apps).
-      // Reports API lives under /deviceManagement/reports (not /deviceAppManagement/reports).
-      const typeSegment = odataType.replace('#', ''); // e.g. "microsoft.graph.win32LobApp"
-
-      if (SUPPORTS_DEVICE_STATUSES.has(odataType)) {
-        const [deviceStatuses, userStatuses] = await Promise.all([
-          graph.beta.get(
-            `/deviceAppManagement/mobileApps/${appId}/${typeSegment}/deviceStatuses`,
-            { $top: top }
-          ),
-          includeUserStatuses
-            ? graph.beta.get(
-                `/deviceAppManagement/mobileApps/${appId}/${typeSegment}/userStatuses`,
-                { $top: top }
-              ).catch(() => null)
-            : Promise.resolve(null),
-        ]);
-        result.deviceStatuses = deviceStatuses;
-        if (includeUserStatuses && userStatuses !== null) result.userStatuses = userStatuses;
-      } else {
-        // MSIX/AppX, WinGet, webApp, etc. — use Intune Reports API (beta, deviceManagement namespace).
-        result.reportNote = `${odataType} does not expose deviceStatuses. Using Intune Reports API (response shape: { schema, values }).`;
-        try {
-          const report = await graph.beta.post(
-            '/deviceManagement/reports/getDeviceInstallStatusReport',
-            {
-              filter: `(ApplicationId eq '${appId}')`,
-              select: [
-                'DeviceId', 'DeviceName', 'Platform', 'UserName', 'UserPrincipalName',
-                'InstallState', 'InstallStateDetail', 'ErrorCode',
-                'LastModifiedDateTime', 'AppVersion',
-              ],
-              skip: 0,
-              top,
-              orderBy: [],
-            }
-          );
-          result.deviceInstallStatusReport = report;
-        } catch {
-          result.assignments = await graph.getAll(`/deviceAppManagement/mobileApps/${appId}/assignments`).catch(() => []);
-          result.reportNote += ' Reports API unavailable — showing assignments as fallback.';
+      // Reports API (v1.0) works for all app types: win32, MSIX, iOS, Android, macOS, WinGet, etc.
+      // Response shape: { Schema: [{Name, Type}], Values: [[...row values]] }
+      result.deviceInstallStatusReport = await graph.post<Record<string, unknown>>(
+        '/deviceManagement/reports/microsoft.graph.retrieveDeviceAppInstallationStatusReport',
+        {
+          filter: `(ApplicationId eq '${appId}')`,
+          select: [
+            'DeviceId', 'DeviceName', 'Platform', 'UserName', 'UserPrincipalName',
+            'InstallState', 'InstallStateDetail', 'ErrorCode',
+            'LastModifiedDateTime', 'AppVersion',
+          ],
+          skip: 0,
+          top,
+          orderBy: [],
         }
+      );
+
+      if (includeUserStatuses) {
+        result.userStatuses = await graph.beta.get(
+          `/deviceAppManagement/mobileApps/${appId}/userStatuses`,
+          { $top: top }
+        ).catch(() => null);
       }
 
-      // installSummary: type-cast path, beta; silently skip if not available
+      // installSummary — type-cast beta path; not available for all types, skip silently
+      const typeSegment = odataType.replace('#', '');
       try {
         result.installSummary = await graph.beta.get(
           `/deviceAppManagement/mobileApps/${appId}/${typeSegment}/installSummary`
         );
-      } catch {
-        // intentionally silent
-      }
+      } catch { /* not available for all app types */ }
 
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
