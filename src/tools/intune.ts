@@ -224,6 +224,55 @@ async function downloadOneDriveItemToTempFile(
 }
 
 /**
+ * Encrypt content with the Intune content-upload scheme (same as what
+ * IntuneWinAppUtil produces for Win32 LOB packages). Layout of the encrypted
+ * buffer: `[HMAC-SHA256(32)] [IV(16)] [AES-256-CBC(plaintext, PKCS7)]`.
+ * Returns the encrypted bytes and the `fileEncryptionInfo` block that Intune
+ * needs on the commit action.
+ *
+ * This is also required for MSIX uploads — Intune rejects the commit with
+ * "ProfileVersion1 requires an EncryptionKey that is 32 bytes long" if you
+ * try to ship an unencrypted payload with empty encryption info.
+ */
+function encryptContentForIntune(plaintext: Buffer): {
+  encrypted: Buffer;
+  fileEncryptionInfo: {
+    encryptionKey: string;
+    initializationVector: string;
+    mac: string;
+    macKey: string;
+    profileIdentifier: 'ProfileVersion1';
+    fileDigest: string;
+    fileDigestAlgorithm: 'SHA256';
+  };
+} {
+  const encryptionKey = crypto.randomBytes(32);
+  const iv = crypto.randomBytes(16);
+  const macKey = crypto.randomBytes(32);
+
+  const cipher = crypto.createCipheriv('aes-256-cbc', encryptionKey, iv);
+  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+
+  const mac = crypto.createHmac('sha256', macKey).update(iv).update(ciphertext).digest();
+
+  const encrypted = Buffer.concat([mac, iv, ciphertext]);
+  const fileDigest = crypto.createHash('sha256').update(plaintext).digest('base64');
+
+  return {
+    encrypted,
+    fileEncryptionInfo: {
+      encryptionKey: encryptionKey.toString('base64'),
+      initializationVector: iv.toString('base64'),
+      mac: mac.toString('base64'),
+      macKey: macKey.toString('base64'),
+      profileIdentifier: 'ProfileVersion1',
+      fileDigest,
+      fileDigestAlgorithm: 'SHA256',
+    },
+  };
+}
+
+/**
  * Extract AppxManifest.xml from an MSIX (or .appx) package on disk and return
  * its UTF-8 bytes base64-encoded. Intune's `mobileAppContentFile.manifest` is
  * required for `windowsUniversalAppX` content — without it the files POST
@@ -817,30 +866,26 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
         logger.info('msix update: reading MSIX into memory', { sourcePath });
         const content = fs.readFileSync(sourcePath);
         logger.info('msix update: MSIX in memory', { bytes: content.length });
-        // Intune's commit action rejects unencrypted MSIX uploads without a
-        // fileEncryptionInfo block ("Invalid action parameters: does not
-        // include 'fileEncryptionInfo'"). We pass empty-string key material
-        // (no encryption) plus the SHA-256 digest of the uploaded bytes so
-        // the service can verify what we wrote to the Azure Blob.
-        const fileDigest = crypto.createHash('sha256').update(content).digest('base64');
-        logger.info('msix update: sha256 computed', { fileDigest });
+        // Intune validates that `fileEncryptionInfo.encryptionKey` is a
+        // 32-byte key (ProfileVersion1), so MSIX uploads must go through the
+        // same AES-256-CBC + HMAC-SHA256 scheme IntuneWinAppUtil uses for
+        // Win32 LOB packages — not an unencrypted passthrough.
+        logger.info('msix update: encrypting with Intune scheme');
+        const { encrypted, fileEncryptionInfo } = encryptContentForIntune(content);
+        const unencryptedSize = content.length;
+        logger.info('msix update: encryption complete', {
+          unencryptedBytes: unencryptedSize,
+          encryptedBytes: encrypted.length,
+        });
 
         const versionId = await uploadAppContentVersion(
           graph,
           appId,
           'microsoft.graph.windowsUniversalAppX',
-          content,
+          encrypted,
           effectiveName,
-          content.length,
-          {
-            encryptionKey: '',
-            macKey: '',
-            initializationVector: '',
-            mac: '',
-            profileIdentifier: 'ProfileVersion1',
-            fileDigest,
-            fileDigestAlgorithm: 'SHA256',
-          },
+          unencryptedSize,
+          fileEncryptionInfo,
           manifestBase64,
         );
 
@@ -857,7 +902,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
               displayName: appDisplayName,
               committedContentVersion: versionId,
               fileName: effectiveName,
-              sizeBytes: content.length,
+              sizeBytes: unencryptedSize,
               message: `MSIX app content updated to contentVersion ${versionId}.`,
             }, null, 2),
           }],
