@@ -556,7 +556,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     async ({ appId, top, includeUserStatuses }) => {
       const app = await graph.get<Record<string, unknown>>(
         `/deviceAppManagement/mobileApps/${appId}`,
-        { $select: 'id,displayName,@odata.type,publishingState,isAssigned' }
+        { $select: 'id,displayName,publishingState,isAssigned' }
       );
       const odataType = (app['@odata.type'] as string) ?? '';
 
