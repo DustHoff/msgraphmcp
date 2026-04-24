@@ -592,23 +592,33 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
         },
       };
 
+      // deviceStatuses / userStatuses require the OData type-cast segment in the URL,
+      // exactly like contentVersions does for win32LobApp uploads.
+      // Only attempt for types that expose this navigation (LOB/store apps).
+      // Reports API lives under /deviceManagement/reports (not /deviceAppManagement/reports).
+      const typeSegment = odataType.replace('#', ''); // e.g. "microsoft.graph.win32LobApp"
+
       if (SUPPORTS_DEVICE_STATUSES.has(odataType)) {
-        // deviceStatuses / userStatuses are only available via the beta API
         const [deviceStatuses, userStatuses] = await Promise.all([
-          graph.beta.get(`/deviceAppManagement/mobileApps/${appId}/deviceStatuses`, { $top: top }),
+          graph.beta.get(
+            `/deviceAppManagement/mobileApps/${appId}/${typeSegment}/deviceStatuses`,
+            { $top: top }
+          ),
           includeUserStatuses
-            ? graph.beta.get(`/deviceAppManagement/mobileApps/${appId}/userStatuses`, { $top: top }).catch(() => null)
+            ? graph.beta.get(
+                `/deviceAppManagement/mobileApps/${appId}/${typeSegment}/userStatuses`,
+                { $top: top }
+              ).catch(() => null)
             : Promise.resolve(null),
         ]);
         result.deviceStatuses = deviceStatuses;
         if (includeUserStatuses && userStatuses !== null) result.userStatuses = userStatuses;
       } else {
-        // MSIX/AppX (windowsUniversalAppX, windowsAppX), WinGet (winGetApp),
-        // webApp, windowsMicrosoftEdgeApp, etc. — use the Intune Reports API (beta only).
-        result.reportNote = `${odataType} does not support the deviceStatuses navigation property. Using Intune Reports API (response shape: { schema, values }).`;
+        // MSIX/AppX, WinGet, webApp, etc. — use Intune Reports API (beta, deviceManagement namespace).
+        result.reportNote = `${odataType} does not expose deviceStatuses. Using Intune Reports API (response shape: { schema, values }).`;
         try {
           const report = await graph.beta.post(
-            '/deviceAppManagement/reports/getDeviceInstallStatusReport',
+            '/deviceManagement/reports/getDeviceInstallStatusReport',
             {
               filter: `(ApplicationId eq '${appId}')`,
               select: [
@@ -623,15 +633,16 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
           );
           result.deviceInstallStatusReport = report;
         } catch {
-          // Last resort: show group assignments so the caller knows deployment targets
           result.assignments = await graph.getAll(`/deviceAppManagement/mobileApps/${appId}/assignments`).catch(() => []);
           result.reportNote += ' Reports API unavailable — showing assignments as fallback.';
         }
       }
 
-      // installSummary is beta-only; silently skip if not available for this app type
+      // installSummary: type-cast path, beta; silently skip if not available
       try {
-        result.installSummary = await graph.beta.get(`/deviceAppManagement/mobileApps/${appId}/installSummary`);
+        result.installSummary = await graph.beta.get(
+          `/deviceAppManagement/mobileApps/${appId}/${typeSegment}/installSummary`
+        );
       } catch {
         // intentionally silent
       }
