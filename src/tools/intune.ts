@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as net from 'node:net';
 import AdmZip from 'adm-zip';
+import * as yauzl from 'yauzl';
 import axios from 'axios';
 import { GraphClient } from '../graph/GraphClient';
 import { encodeId, odataQuote, userPath, encodeDrivePath } from './shared';
@@ -226,16 +227,45 @@ async function downloadOneDriveItemToTempFile(
  * its UTF-8 bytes base64-encoded. Intune's `mobileAppContentFile.manifest` is
  * required for `windowsUniversalAppX` content — without it the files POST
  * fails with a generic 400 BadRequest from the Stateless app metadata proxy.
- * Reads directly from the file path so we do not hold the full MSIX buffer in
- * memory twice (once for the AdmZip parser and again for the blob upload).
+ * Uses yauzl (not adm-zip) because MSIX packages are signed ZIPs that set the
+ * "data descriptor" flag on entries; adm-zip fails to parse those with
+ * "Descriptor data is malformed".
  */
-function readMsixAppxManifestBase64FromFile(msixPath: string): string {
-  const zip = new AdmZip(msixPath);
-  const entry = zip.getEntry('AppxManifest.xml');
-  if (!entry) {
-    throw new Error('AppxManifest.xml not found at the MSIX package root');
-  }
-  return entry.getData().toString('base64');
+function readMsixAppxManifestBase64FromFile(msixPath: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    yauzl.open(msixPath, { lazyEntries: true }, (err, zipfile) => {
+      if (err || !zipfile) return reject(err ?? new Error('yauzl: failed to open MSIX'));
+      let found = false;
+      zipfile.on('entry', (entry: yauzl.Entry) => {
+        if (entry.fileName !== 'AppxManifest.xml') {
+          zipfile.readEntry();
+          return;
+        }
+        found = true;
+        zipfile.openReadStream(entry, (rsErr, readStream) => {
+          if (rsErr || !readStream) {
+            zipfile.close();
+            return reject(rsErr ?? new Error('yauzl: no read stream for AppxManifest.xml'));
+          }
+          const chunks: Buffer[] = [];
+          readStream.on('data', (c: Buffer) => chunks.push(c));
+          readStream.on('end', () => {
+            zipfile.close();
+            resolve(Buffer.concat(chunks).toString('base64'));
+          });
+          readStream.on('error', (e) => {
+            zipfile.close();
+            reject(e);
+          });
+        });
+      });
+      zipfile.on('end', () => {
+        if (!found) reject(new Error('AppxManifest.xml not found at the MSIX package root'));
+      });
+      zipfile.on('error', reject);
+      zipfile.readEntry();
+    });
+  });
 }
 
 const BLOB_BLOCK_SIZE = 4 * 1024 * 1024; // 4 MB per block
@@ -781,7 +811,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
         if (!fs.existsSync(sourcePath)) throw new Error(`File not found: ${sourcePath}`);
         const effectiveName = fileName ?? defaultName;
         logger.info('msix update: extracting AppxManifest.xml', { sourcePath });
-        const manifestBase64 = readMsixAppxManifestBase64FromFile(sourcePath);
+        const manifestBase64 = await readMsixAppxManifestBase64FromFile(sourcePath);
         logger.info('msix update: manifest extracted', { manifestBytes: manifestBase64.length });
         logger.info('msix update: reading MSIX into memory', { sourcePath });
         const content = fs.readFileSync(sourcePath);
