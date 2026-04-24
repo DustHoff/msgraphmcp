@@ -4,7 +4,7 @@
 [![Docker](https://github.com/DustHoff/msgraphmcp/actions/workflows/docker.yml/badge.svg)](https://github.com/DustHoff/msgraphmcp/actions/workflows/docker.yml)
 [![GHCR](https://img.shields.io/badge/ghcr.io-msgraphmcp-blue?logo=github)](https://github.com/DustHoff/msgraphmcp/pkgs/container/msgraphmcp)
 
-**MCP Server for the Microsoft Graph API** — runs as a container, exposes **115+ tools** across all major Microsoft 365 workloads to any MCP-compatible client such as [Claude Code](https://claude.ai/code), and supports four authentication modes: **authorization code + PKCE** (delegated, recommended for Kubernetes/HTTP), **client secret** (app-only), **client certificate** (app-only, recommended for production), and **device code** (interactive, local use).
+**MCP Server for the Microsoft Graph API** — runs as a container, exposes **140+ tools** across all major Microsoft 365 workloads to any MCP-compatible client such as [Claude Code](https://claude.ai/code), and supports four authentication modes: **authorization code + PKCE** (delegated, recommended for Kubernetes/HTTP), **client secret** (app-only), **client certificate** (app-only, recommended for production), and **device code** (interactive, local use).
 
 ---
 
@@ -34,6 +34,9 @@
   - [Intune — Settings Catalog](#intune--settings-catalog)
   - [Intune — Compliance Policies](#intune--compliance-policies)
   - [Intune — Managed Devices](#intune--managed-devices)
+  - [Intune — Device Diagnostics](#intune--device-diagnostics)
+  - [Intune — Notification Templates](#intune--notification-templates)
+  - [Auth](#auth)
 - [Development](#development)
 - [CI/CD and Docker Registry](#cicd-and-docker-registry)
 - [Security Notes](#security-notes)
@@ -59,10 +62,14 @@ Claude Code (MCP client)           Another MCP client
 
 HTTP mode auth flow (authorization code, per-session):
   1. MCP client connects  →  server creates session with isolated TokenManager
-  2. Tool call without auth  →  401 + loginUrl (/auth/login?session_id=<id>)
-  3. Browser → GET /auth/login?session_id=<id>  →  Microsoft Login
+  2. Tool call without auth  →  401 + loginUrl (/auth/login?token=<one-time-token>)
+  3. Browser → GET /auth/login?token=<one-time-token>  →  Microsoft Login
   4. GET /auth/callback  →  token stored in that session's TokenManager only
   5. Subsequent tool calls from the same session use that user's token exclusively
+
+The login token is a single-use 256-bit value that maps server-side to the
+MCP session — the session ID itself never appears in any URL, browser
+history, or proxy log.
 ```
 
 In HTTP mode every MCP session gets its own isolated `TokenManager` — tokens are never shared between sessions. Each user authenticates independently. Tokens are kept in-memory for the lifetime of the session; no cross-user token bleed is possible even when multiple clients are connected simultaneously.
@@ -262,7 +269,9 @@ Step 1 — Connect your MCP client (Claude Code or other)
   └─► Session ID returned in response header:  mcp-session-id: <uuid>
 
 Step 2 — Authenticate (once per session / pod restart)
-  GET /auth/login?session_id=<uuid>
+  Tool call without auth → 401 response containing a fresh loginUrl
+  GET /auth/login?token=<one-time-token>
+  └─► Server resolves the one-time token → session, invalidates the token
   └─► Server generates PKCE code_verifier + S256 challenge
   └─► Redirects browser → Microsoft login page
   └─► User authenticates + consents
@@ -275,33 +284,37 @@ Step 3 — Tool calls
   └─► On 401 from Graph: single retry with fresh token, then error
 ```
 
-#### How to find your session ID
+#### How to start the login flow
 
-The session ID is embedded in every 401 response when a tool call is made before authenticating:
+A fresh `loginUrl` is embedded in every 401 response to an unauthenticated
+tool call, and is also returned by the `get_login_url` MCP tool:
 
 ```json
 {
   "error": "Unauthorized",
-  "loginUrl": "https://msgraph.example.com/auth/login?session_id=1df3d7cc-d45b-4c27-992d-26f06eb8488d"
+  "loginUrl": "https://msgraph.example.com/auth/login?token=3941f8c7dca11388..."
 }
 ```
 
-Open the `loginUrl` directly in a browser to authenticate. Alternatively, the session ID is available in the `mcp-session-id` header of the MCP initialize response.
+Open the `loginUrl` directly in a browser to authenticate. The token is
+single-use and expires after 15 minutes — each tool call / `get_login_url`
+invocation mints a new one bound to the current MCP session. The session
+ID itself is never exposed in URLs.
 
 #### Health check
+
+The `/health` endpoint intentionally returns only aggregate counts — no
+session IDs, no UPNs — so that anyone who can reach the endpoint cannot
+enumerate active users or sessions.
 
 ```
 GET /health
 → {
     "status": "ok",
+    "service": "msgraphmcp",
     "authMode": "authorization-code",
     "sessions": 2,
-    "authenticatedSessions": 1,
-    "sessionDetails": [
-      { "sessionId": "1df3d7cc-...", "authenticated": true,  "user": "alice@contoso.com" },
-      { "sessionId": "9a2f1bc0-...", "authenticated": false, "user": null }
-    ],
-    "loginUrlTemplate": "https://.../auth/login?session_id=<mcp-session-id>"
+    "authenticatedSessions": 1
   }
 ```
 
@@ -554,13 +567,23 @@ create_event subject="Sprint Review" startDateTime="2024-06-14T14:00:00" endDate
 | `get_intune_app` | Get app details | `appId`, `select` |
 | `create_intune_web_app` | Add a web shortcut app | `displayName`, `publisher`, `appUrl` |
 | `create_intune_store_app` | Add a store app | `displayName`, `publisher`, `storeType` (`windowsStore`\|`iosStore`\|`androidStore`), `appStoreUrl` |
-| `update_intune_app` | Update app metadata | `appId`, `displayName`, `description`, `isFeatured`, … |
+| `update_intune_app` | Update app metadata (incl. Win32 detection `rules`) | `appId`, `displayName`, `description`, `isFeatured`, `rules[]`, … |
 | `delete_intune_app` | Delete an app | `appId` |
+| `upload_win32_lob_app` | Upload a `.intunewin` Win32 LOB package | `filePath` **or** `fileUrl`, `displayName`, `publisher`, `installCommandLine`, `uninstallCommandLine`, `setupFilePath`, `applicableArchitectures`, `minimumSupportedWindowsRelease`, `runAsAccount`, `deviceRestartBehavior` |
+| `list_intune_app_relationships` | List supersedence / dependency links | `appId` |
+| `set_intune_app_relationships` | Set supersedence / dependency links (replaces all) | `appId`, `relationships[]` |
 | `list_intune_app_assignments` | List assignments | `appId` |
-| `assign_intune_app` | Assign to groups | `appId`, `assignments[]` (`groupId`, `intent`) |
-| `get_intune_app_install_status` | Per-device install status | `appId`, `top` |
+| `assign_intune_app` | Assign to groups (replaces all existing) | `appId`, `assignments[]` (`groupId`, `intent`, `filterMode`, `filterId`) |
+| `get_intune_app_install_status` | Per-device install status (Reports API) | `appId`, `top`, `includeUserStatuses` |
+| `list_intune_app_protection_policies` | List MAM / App Protection policies | `platform` (`ios`\|`android`\|`all`) |
 
 **Assignment intent values:** `available`, `required`, `uninstall`, `availableWithoutEnrollment`
+
+**Win32 LOB upload notes:**
+
+- `fileUrl` is fetched server-side with an SSRF guard (http/https only; loopback, link-local, RFC1918 ranges, and cloud-metadata hostnames are blocked).
+- Downloads are capped at 2 GB.
+- After upload, set detection/requirement rules via `update_intune_app` (field `rules[]`) and assign to groups via `assign_intune_app`.
 
 **Example — assign app as required:**
 ```
@@ -670,10 +693,20 @@ The Settings Catalog is the modern replacement for device configuration profiles
 | `get_managed_device` | Get device details | `deviceId` |
 | `sync_managed_device` | Trigger policy sync | `deviceId` |
 | `restart_managed_device` | Reboot a device | `deviceId` |
+| `shutdown_managed_device` | Shut down a Windows device | `deviceId` |
+| `lock_managed_device` | Remote lock (PIN/password required to unlock) | `deviceId` |
+| `set_managed_device_name` | Rename a Windows device (≤ 15 chars) | `deviceId`, `deviceName` |
 | `retire_managed_device` | Unenroll (keep personal data) | `deviceId` |
 | `wipe_managed_device` | Factory reset (**destructive**) | `deviceId`, `keepEnrollmentData`, `keepUserData` |
+| `disable_managed_device` | Disable a device — keeps enrollment, blocks access | `deviceId` |
+| `reenable_managed_device` | Re-enable a previously disabled device | `deviceId` |
+| `send_device_notification` | Push a Company Portal notification | `deviceId`, `notificationTitle`, `notificationBody` |
+| `windows_defender_scan` | Trigger a Defender antivirus scan | `deviceId`, `quickScan` |
+| `windows_defender_update_signatures` | Force Defender signature update | `deviceId` |
+| `rotate_bitlocker_keys` | Rotate BitLocker recovery key (escrowed to Entra) | `deviceId` |
+| `rotate_local_admin_password` | Rotate Windows LAPS local admin password | `deviceId` |
+| `trigger_proactive_remediation` | Run a Proactive Remediation script on demand | `deviceId`, `scriptId` |
 | `get_device_compliance_overview` | Tenant-wide compliance stats | — |
-| `list_intune_app_protection_policies` | List MAM policies | `platform` (`ios`\|`android`\|`all`) |
 
 > **Warning:** `wipe_managed_device` erases all data on the device. Use with extreme caution.
 
@@ -683,6 +716,45 @@ filter="operatingSystem eq 'Windows'"
 filter="complianceState eq 'noncompliant'"
 filter="contains(deviceName,'DESKTOP')"
 ```
+
+---
+
+### Intune — Device Diagnostics
+
+| Tool | Description | Key Parameters |
+|---|---|---|
+| `collect_device_diagnostics` | Start a "Collect diagnostics" remote action | `deviceId` |
+| `list_device_diagnostics` | List / get status of diagnostic collection requests | `deviceId`, `requestId` (optional) |
+| `download_device_diagnostics` | Generate a SAS download URL for a completed ZIP | `deviceId`, `requestId` |
+
+Workflow:
+1. `collect_device_diagnostics` → returns a `requestId`.
+2. Poll `list_device_diagnostics` until `status: "completed"`.
+3. `download_device_diagnostics` → returns `{ value: "<sas-url>" }` pointing at the ZIP archive.
+
+---
+
+### Intune — Notification Templates
+
+| Tool | Description | Key Parameters |
+|---|---|---|
+| `list_notification_templates` | List templates | `top` |
+| `get_notification_template` | Get a template + localized messages | `templateId` |
+| `create_notification_template` | Create a template (via beta) | `displayName`, `defaultLocale`, `brandingOptions`, `roleScopeTagIds` |
+| `update_notification_template` | Update template metadata | `templateId`, `displayName`, `brandingOptions`, … |
+| `delete_notification_template` | Delete a template | `templateId` |
+| `add_notification_template_message` | Add / update a localized message | `templateId`, `locale`, `subject`, `messageTemplate`, `isDefault` |
+| `send_notification_template_test` | Send a test email using the default locale | `templateId` |
+
+> `create_notification_template` is routed through the `beta` API because the v1.0 endpoint returns 400 for all write operations on this resource.
+
+---
+
+### Auth
+
+| Tool | Description | Key Parameters |
+|---|---|---|
+| `get_login_url` | Returns authentication status and a fresh one-time login URL when sign-in is required. Call this first whenever another tool returns an auth error. | — |
 
 ---
 
@@ -719,6 +791,8 @@ msgraphmcp/
 │   ├── graph/
 │   │   └── GraphClient.ts        Axios wrapper: auth header injection, pagination, error handling
 │   └── tools/
+│       ├── shared.ts             URL / OData / HTML escaping helpers
+│       ├── auth.ts               1 tool  (get_login_url)
 │       ├── users.ts              7 tools
 │       ├── mail.ts               9 tools
 │       ├── calendar.ts           7 tools
@@ -728,7 +802,7 @@ msgraphmcp/
 │       ├── contacts.ts           5 tools
 │       ├── tasks.ts              8 tools
 │       ├── sites.ts              10 tools
-│       └── intune.ts             39 tools
+│       └── intune.ts             63 tools (apps · win32 LOB · config · settings catalog · compliance · devices · diagnostics · notification templates)
 ├── tests/
 │   ├── helpers/
 │   │   ├── MockMcpServer.ts      Captures tool registrations for unit testing
@@ -785,13 +859,20 @@ docker pull ghcr.io/DustHoff/msgraphmcp:latest
 ## Security Notes
 
 - **Per-session token isolation (Mode A):** each MCP session in HTTP mode holds its own in-memory token. Tokens are never shared between sessions — a compromised session cannot access another user's data. Tokens are lost on pod restart; re-authentication is a single browser visit via the `loginUrl` in the 401 response.
+- **One-time login tokens:** the `loginUrl` carries a single-use 256-bit token (not the MCP session ID). It is consumed on first visit, expires after 15 minutes, and binds server-side to exactly one session — so even if a login URL is disclosed via browser history, a proxy log, or an email it cannot be replayed.
+- **HTML escaping on the auth pages:** the `/auth/callback` error page escapes all five HTML-significant characters (`&`, `<`, `>`, `"`, `'`) — an attacker cannot reflect a crafted `error_description` (including HTML numeric entities like `&#60;script&#62;`) into executable markup.
+- **URL-path safety:** all user-supplied opaque ids passed to Graph (`groupId`, `teamId`, `channelId`, `appId`, `configId`, `policyId`, `templateId`, `deviceId`, `siteId`, `listId`, `itemId`, `memberId`, `ownerId`, `userId`) are percent-encoded before they are embedded in Graph URLs, so a tool argument cannot smuggle extra path segments, query strings, or fragments into a request. SharePoint composite site ids (`hostname,guid,guid`) keep their commas intact.
+- **SSRF guard on Win32 LOB upload:** `upload_win32_lob_app` with a `fileUrl` argument rejects non-http(s) schemes and blocks loopback, link-local, RFC1918, cloud-metadata and multicast ranges before issuing the download. The download size is capped at 2 GB.
+- **Request-body limit:** the HTTP server caps incoming request bodies at 4 MB and destroys the socket immediately on overflow to prevent OOM via a large JSON-RPC payload.
+- **Session limits:** `MAX_SESSIONS` (default 50) caps concurrent sessions; `SESSION_IDLE_TIMEOUT_MINUTES` (default 60) reaps idle sessions so abandoned connections do not leak memory.
+- **Sensitive-value redaction in debug logs:** values of keys matching `/password|secret|token|credential|private[-_]?key|apikey/i` are replaced with `***REDACTED***` before any request/response body is logged.
 - **Token cache file** (`tokens.json`) is only written in device-code (Mode D) and stdio mode. Written with `mode 0o600`; mount as a restricted Docker volume; do not bake into images.
 - The image runs as the **non-root `node` user** (see `Dockerfile`).
-- **Secrets** (`AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, certificate thumbprint) — use Kubernetes Secrets or an external vault; never commit real values to the repository.
+- **Secrets** (`AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, certificate thumbprint) — use Kubernetes Secrets or an external vault; never commit real values to the repository. `secrets.txt`, `tokens.json`, and `data/` are excluded via both `.gitignore` and `.dockerignore`.
 - **Prefer authorization code (Mode A) over device code (Mode D)** for HTTP deployments — tokens are tied to the user's browser device so CA compliance is evaluated correctly. Device code refresh from a non-enrolled container is rejected by device-compliance CA policies.
 - **Prefer client certificate (Mode C) over client secret (Mode B)** for app-only deployments — certificates are not transmitted over the wire and can be rotated without application downtime.
-- **Authorization code flow:** `/auth/login?session_id=<id>` and `/auth/callback` must be reachable by the authenticating browser but do not need to be internet-facing — internal DNS is sufficient. The `session_id` parameter is required; requests without a valid session ID are rejected with 400.
-- **Graph API logging** includes the authenticated user's UPN (`"user": "alice@contoso.com"`) in every log entry, making all MS Graph calls attributable to a specific user identity.
+- **Authorization code flow:** `/auth/login?token=<one-time-token>` and `/auth/callback` must be reachable by the authenticating browser but do not need to be internet-facing — internal DNS is sufficient. Requests without a valid, unexpired token are rejected with 400.
+- **Graph API logging** includes the authenticated user's UPN (`"user": "alice@contoso.com"`) in every log entry, making all MS Graph calls attributable to a specific user identity. Set `LOG_LEVEL=warn` in production to suppress URL logging if UPNs in logs are a concern.
 - Scope down `GRAPH_SCOPES` (delegated modes) or grant only the required permissions (app-only modes) for your use case.
 - `wipe_managed_device` is irreversible — consider requiring explicit confirmation in your workflows.
 - See [`SECURITY-NOTICE.md`](SECURITY-NOTICE.md) for the full security assessment including dependency risk analysis.

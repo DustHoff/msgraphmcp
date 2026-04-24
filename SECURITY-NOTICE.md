@@ -1,7 +1,7 @@
 # Security Notice
 
-**Reviewed:** 2026-04-19  
-**Scope:** source code, dependencies, container, Kubernetes manifests  
+**Reviewed:** 2026-04-24 (update — initial review 2026-04-19)
+**Scope:** source code, dependencies, container, Kubernetes manifests
 **npm audit result:** 0 vulnerabilities (info / low / moderate / high / critical)
 
 ---
@@ -17,9 +17,9 @@
 
 ## 1. Findings Fixed in This Review
 
-### 1.1 HTTP request body — no size limit (DoS / OOM) — FIXED
+### 1.1 HTTP request body — no size limit (DoS / OOM) — FIXED (2026-04-19)
 
-**Severity:** Medium  
+**Severity:** Medium
 **File:** `src/index.ts` — `parseBody()`
 
 The HTTP server (Kubernetes mode) accumulated all request data in memory without
@@ -31,9 +31,9 @@ are immediately destroyed before any allocation happens.
 
 ---
 
-### 1.2 Token cache written with world-readable permissions (0644) — FIXED
+### 1.2 Token cache written with world-readable permissions (0644) — FIXED (2026-04-19)
 
-**Severity:** Medium  
+**Severity:** Medium
 **File:** `src/auth/TokenManager.ts` — `afterCacheAccess()`
 
 The MSAL token cache (`tokens.json`) was written using Node.js default file
@@ -42,6 +42,103 @@ the file and obtain the MSAL refresh token.
 
 **Fix:** `fs.writeFileSync(..., { mode: 0o600 })` — only the owning user
 (`node`, UID 1000 in the container) may read or write the file.
+
+---
+
+### 1.3 Reflected XSS in `/auth/callback` error page — FIXED (2026-04-24)
+
+**Severity:** Medium
+**File:** `src/index.ts` — `errorPage()`
+
+The auth error page escaped only `<`, so the following OAuth callback request
+would render an executable `<script>` tag in the user's browser after the
+browser's HTML entity decoder ran:
+
+```
+GET /auth/callback?error=invalid_request&error_description=&%2360;script&%2362;alert(1)&%2360;/script&%2362;
+```
+
+The `&#60;` entities would be decoded back into `<` before HTML parsing,
+bypassing the single-character escape.
+
+**Fix:** replaced the ad-hoc `detail.replace(/</g, '&lt;')` with a complete
+`escapeHtml()` helper in `src/tools/shared.ts` that escapes all five
+HTML-significant characters (`&`, `<`, `>`, `"`, `'`). The new helper is
+unit-tested with the entity-based injection payload to prevent regression.
+
+---
+
+### 1.4 User-supplied ids embedded verbatim in Graph URLs — FIXED (2026-04-24)
+
+**Severity:** Medium
+**Files:** `src/tools/groups.ts`, `src/tools/teams.ts`, `src/tools/sites.ts`,
+`src/tools/intune.ts`
+
+Many tools inserted `groupId`, `teamId`, `channelId`, `appId`, `configId`,
+`policyId`, `templateId`, `deviceId`, `memberId`, `ownerId`, `userId`,
+`siteId`, `listId`, `itemId` etc. directly into Graph API URL paths
+without percent-encoding. A tool argument containing `/`, `?`, `#`, or
+whitespace could therefore change the target Graph endpoint, smuggle
+additional query parameters, or break the request in ways that a Zod
+`z.string()` schema did not catch.
+
+**Fix:**
+
+- Added `encodeId()` helper in `src/tools/shared.ts` and applied it to
+  every opaque-id path segment across the affected tool modules.
+- `src/tools/sites.ts` uses a dedicated `encodeSiteId()` that preserves
+  the commas in SharePoint composite site ids (`hostname,guid,guid`) —
+  encoding those would change the identity and the API returns 404.
+- `src/tools/intune.ts` uses `odataQuote()` for values that are wrapped
+  in OData single-quoted key segments (e.g. `managedDevices('{id}')`)
+  so embedded apostrophes cannot terminate the key expression early.
+- Regression tests added in `tests/tools/{groups,teams,sites,intune,shared}.test.ts`
+  exercise the encoding explicitly.
+
+**Risk assessment after fix:** the Graph API still enforces tenant-level
+authorisation, so the pre-fix issue could not cross tenant boundaries,
+but within a tenant a malformed id could have been redirected to an
+unintended sibling resource. The fix closes that class of bug entirely.
+
+---
+
+### 1.5 `collect_device_diagnostics` body missing `@odata.type` — FIXED (2026-04-24)
+
+**Severity:** Low (functional bug, not a security issue)
+**File:** `src/tools/intune.ts`
+
+The `templateType` wrapper on the `createDeviceLogCollectionRequest`
+action was sent without `@odata.type`, which per the Graph spec is a
+complex type of `microsoft.graph.deviceLogCollectionRequest`. Some
+tenants reject the call with HTTP 400 as a result. Fixed to include
+the type annotation.
+
+---
+
+### 1.6 `get_intune_app_install_status` — `$select` stripped `@odata.type` — FIXED (2026-04-24)
+
+**Severity:** Low (functional bug)
+**File:** `src/tools/intune.ts`
+
+The tool fetched the `mobileApp` with `$select: 'id,displayName,publishingState'`,
+which removes `@odata.type` from the response. The subsequent
+`installSummary` lookup depends on `@odata.type` to build the type-cast
+URL (`/deviceAppManagement/mobileApps/{id}/{type}/installSummary`) and
+was therefore always a silent no-op. The `$select` was removed and the
+`installSummary` call is now skipped cleanly when no type is known.
+
+---
+
+### 1.7 Image / token-cache leakage hardening — FIXED (2026-04-24)
+
+**Severity:** Low (defence-in-depth)
+**File:** `.dockerignore`
+
+Added explicit `secrets.txt`, `tokens.json`, `*.tokens.json`, and `data/`
+entries so a local token cache or a developer-only `secrets.txt` cannot
+accidentally be copied into the container image by a future `Dockerfile`
+change. The current `Dockerfile` already uses a narrow `COPY dist ./dist`
+so no active leakage existed.
 
 ---
 
@@ -150,21 +247,23 @@ the `msgraphmcp` pod to known consumer namespaces only.
 
 ---
 
-### 3.2 MCP sessions — no idle timeout
+### 3.2 MCP sessions — idle timeout + concurrency cap (was: no idle timeout) — RESOLVED
 
-**Severity:** Low
+**Severity:** Low → resolved
 
-Sessions created in HTTP mode are stored in an in-memory `Map` and are only
-removed when the client sends a `DELETE /mcp` request or the server restarts.
-Clients that disconnect without sending `DELETE` (e.g., crash, network loss)
-leave orphaned session entries.
+Sessions in HTTP mode are stored in an in-memory `Map`. The earlier version of
+this server had no upper bound and no idle-timeout, which meant abandoned
+clients leaked `TokenManager` + `GraphClient` instances until the pod was
+restarted.
 
-**Impact:** Memory growth proportional to the number of abandoned sessions.
-For a small internal deployment with controlled clients this is acceptable.
-Each idle session consumes < 1 KB of overhead.
+**Current controls:**
 
-**Recommendation:** For high-traffic environments, add a session idle-timeout
-(e.g., 4 hours) with a background cleanup interval.
+- `MAX_SESSIONS` (default 50, via env var) caps the number of concurrent
+  sessions; new connections beyond the limit receive `HTTP 503`.
+- `SESSION_IDLE_TIMEOUT_MINUTES` (default 60, via env var) closes idle
+  sessions on a 5-minute background sweep.
+- Each session still consumes < 1 KB of overhead, so the caps give a
+  predictable worst-case memory footprint per pod.
 
 ---
 
@@ -191,25 +290,32 @@ encrypts the serialised cache, e.g., using Node.js `crypto.createCipheriv`).
 
 ---
 
-### 3.4 Graph API URL paths — user-controlled path segments
+### 3.4 Graph API URL paths — user-controlled path segments — MITIGATED
 
 **Severity:** Low
 
 Several tools in `src/tools/files.ts` embed user-supplied `filePath` and
-`itemPath` values directly in Graph API URL paths (e.g.,
-`/drive/root:${filePath}:/content`).  No explicit path normalisation is applied.
+`itemPath` values in Graph API URL paths (e.g.,
+`/drive/root:${filePath}:/content`). The segments between `root:` and `:`
+are encoded segment-by-segment by `encodeDrivePath()` so that `/` separators
+stay intact while `#`, `?`, `%`, whitespace, etc. are percent-encoded.
 
-**Why the risk is low:**
+As of the 2026-04-24 review, every **opaque id** passed to Graph (group,
+team, channel, app, config, policy, template, device, site, list, item,
+member, owner, user) is also percent-encoded at the tool layer — see
+finding 1.4. Only OneDrive/SharePoint path-shaped inputs retain their
+internal `/` separators on purpose.
+
+**Why the residual risk is low:**
 
 - The Graph API scopes all `root:/path:` segments to the authenticated user's
-  own OneDrive.  Cross-user access via path traversal is structurally impossible
-  within the Graph API.
-- `userId` is always encoded with `encodeURIComponent()`, preventing header
-  injection or path escaping at the user-segment level.
-- All parameters pass through Zod `z.string()` schema validation (rejects
-  non-string inputs and enforces max length via overall payload size limit).
+  own OneDrive. Cross-user access via path traversal is structurally
+  impossible within the Graph API.
+- `userId` is always encoded via `userPath()` (which percent-encodes
+  non-`me` values) before being embedded in any URL.
+- All parameters pass through Zod `z.string()` schema validation.
 
-**Recommendation:** Add a `z.string().regex(/^\/[^<>:"|?*]+$/)` refine to
+**Optional hardening:** add a `z.string().regex(/^\/[^<>:"|?*]+$/)` refine to
 `filePath`/`itemPath` parameters to reject clearly malformed paths early and
 improve error messages for MCP clients.
 
