@@ -593,20 +593,21 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
       };
 
       if (SUPPORTS_DEVICE_STATUSES.has(odataType)) {
+        // deviceStatuses / userStatuses are only available via the beta API
         const [deviceStatuses, userStatuses] = await Promise.all([
-          graph.get(`/deviceAppManagement/mobileApps/${appId}/deviceStatuses`, { $top: top }),
+          graph.beta.get(`/deviceAppManagement/mobileApps/${appId}/deviceStatuses`, { $top: top }),
           includeUserStatuses
-            ? graph.get(`/deviceAppManagement/mobileApps/${appId}/userStatuses`, { $top: top }).catch(() => null)
+            ? graph.beta.get(`/deviceAppManagement/mobileApps/${appId}/userStatuses`, { $top: top }).catch(() => null)
             : Promise.resolve(null),
         ]);
         result.deviceStatuses = deviceStatuses;
         if (includeUserStatuses && userStatuses !== null) result.userStatuses = userStatuses;
       } else {
         // MSIX/AppX (windowsUniversalAppX, windowsAppX), WinGet (winGetApp),
-        // webApp, windowsMicrosoftEdgeApp, etc. — use the Intune Reports API.
+        // webApp, windowsMicrosoftEdgeApp, etc. — use the Intune Reports API (beta only).
         result.reportNote = `${odataType} does not support the deviceStatuses navigation property. Using Intune Reports API (response shape: { schema, values }).`;
         try {
-          const report = await graph.post(
+          const report = await graph.beta.post(
             '/deviceAppManagement/reports/getDeviceInstallStatusReport',
             {
               filter: `(ApplicationId eq '${appId}')`,
@@ -628,9 +629,9 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
         }
       }
 
-      // Aggregate summary available on most app types (not webApp / some edge cases)
+      // installSummary is beta-only; silently skip if not available for this app type
       try {
-        result.installSummary = await graph.get(`/deviceAppManagement/mobileApps/${appId}/installSummary`);
+        result.installSummary = await graph.beta.get(`/deviceAppManagement/mobileApps/${appId}/installSummary`);
       } catch {
         // intentionally silent
       }
