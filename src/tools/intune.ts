@@ -1,6 +1,8 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import AdmZip from 'adm-zip';
 import axios from 'axios';
 import { GraphClient } from '../graph/GraphClient';
@@ -47,6 +49,18 @@ function parseIntuneWin(filePath: string): IntuneWinInfo {
     fileDigest: xmlValue(xml, 'FileDigest'),
     fileDigestAlgorithm: xmlValue(xml, 'FileDigestAlgorithm') || 'SHA256',
   };
+}
+
+async function downloadToTempFile(url: string): Promise<string> {
+  const tmpPath = path.join(os.tmpdir(), `intunewin-${Date.now()}-${Math.random().toString(36).slice(2)}.intunewin`);
+  const response = await axios.get<NodeJS.ReadableStream>(url, { responseType: 'stream' });
+  await new Promise<void>((resolve, reject) => {
+    const dest = fs.createWriteStream(tmpPath);
+    (response.data as NodeJS.ReadableStream).pipe(dest);
+    dest.on('finish', resolve);
+    dest.on('error', reject);
+  });
+  return tmpPath;
 }
 
 const BLOB_BLOCK_SIZE = 4 * 1024 * 1024; // 4 MB per block
@@ -303,11 +317,14 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
   server.tool(
     'upload_win32_lob_app',
     'Upload a Win32 LOB app (.intunewin file) to Intune. ' +
-    'The .intunewin file must be accessible on the server filesystem — place it under /data (shared PVC). ' +
+    'Provide either filePath (absolute path on the server, e.g. /data/myapp.intunewin) ' +
+    'or fileUrl (HTTP/HTTPS URL from which the server will download the file). ' +
     'After upload, set detection rules via update_intune_app and assign groups via assign_intune_app.',
     {
-      filePath: z.string()
+      filePath: z.string().optional()
         .describe('Absolute path to the .intunewin file on the server, e.g. /data/myapp.intunewin'),
+      fileUrl: z.string().url().optional()
+        .describe('HTTP/HTTPS URL of the .intunewin file — the server will download it before uploading to Intune'),
       displayName: z.string(),
       publisher: z.string(),
       description: z.string().optional(),
@@ -325,13 +342,21 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
       deviceRestartBehavior: z.enum(['allow', 'basedOnReturnCode', 'suppress', 'force']).default('allow'),
     },
     async ({
-      filePath, displayName, publisher, description,
+      filePath, fileUrl, displayName, publisher, description,
       installCommandLine, uninstallCommandLine, setupFilePath,
       applicableArchitectures, minimumSupportedWindowsRelease,
       runAsAccount, deviceRestartBehavior,
     }) => {
-      // ① Parse .intunewin — extract Detection.xml metadata + encrypted content blob
-      const info = parseIntuneWin(filePath);
+      if (!filePath && !fileUrl) throw new Error('Provide either filePath or fileUrl.');
+      if (filePath && fileUrl) throw new Error('Provide only one of filePath or fileUrl, not both.');
+
+      // ① Download from URL if needed, then parse .intunewin
+      let tmpPath: string | undefined;
+      if (fileUrl) {
+        tmpPath = await downloadToTempFile(fileUrl);
+        filePath = tmpPath;
+      }
+      const info = parseIntuneWin(filePath!);
 
       // ② Create Win32LobApp metadata entry
       const app = await graph.post<{ id: string }>('/deviceAppManagement/mobileApps', {
@@ -435,6 +460,8 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
         // Remove the shell app entry so there is no orphaned app without content
         await graph.delete(`/deviceAppManagement/mobileApps/${app.id}`).catch(() => {});
         throw err;
+      } finally {
+        if (tmpPath) fs.unlink(tmpPath, () => {});
       }
     }
   );
@@ -513,17 +540,103 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
 
   server.tool(
     'get_intune_app_install_status',
-    'Get device/user install status for an Intune app.',
+    'Get device/user install status for an Intune app. ' +
+    'Automatically routes to the right API based on app type: ' +
+    'Win32/MSI/iOS/Android LOB & Store apps use the deviceStatuses navigation property (array of status objects); ' +
+    'MSIX/AppX, WinGet, webApp and all other types use the Intune Reports API ' +
+    '(returns { schema, values } rows — note different shape). ' +
+    'Always includes an installSummary with aggregate counts (installed/failed/pending/notInstalled/notApplicable). ' +
+    'Optionally returns per-user statuses for Win32/MSI/iOS/Android types.',
     {
       appId: z.string(),
       top: z.number().int().min(1).max(200).default(25),
+      includeUserStatuses: z.boolean().default(false)
+        .describe('Also return per-user install states (Win32/MSI/iOS/Android LOB+Store apps only)'),
     },
-    async ({ appId, top }) => {
-      const statuses = await graph.get(
-        `/deviceAppManagement/mobileApps/${appId}/deviceStatuses`,
-        { $top: top }
+    async ({ appId, top, includeUserStatuses }) => {
+      const app = await graph.get<Record<string, unknown>>(
+        `/deviceAppManagement/mobileApps/${appId}`,
+        { $select: 'id,displayName,@odata.type,publishingState,isAssigned' }
       );
-      return { content: [{ type: 'text', text: JSON.stringify(statuses, null, 2) }] };
+      const odataType = (app['@odata.type'] as string) ?? '';
+
+      // App types that expose the deviceStatuses navigation property in Graph API v1.0.
+      // windowsUniversalAppX / windowsAppX / winGetApp / webApp and newer store types do NOT.
+      const SUPPORTS_DEVICE_STATUSES = new Set([
+        '#microsoft.graph.win32LobApp',
+        '#microsoft.graph.windowsMobileMSI',
+        '#microsoft.graph.iosStoreApp',
+        '#microsoft.graph.iosLobApp',
+        '#microsoft.graph.iosVppApp',
+        '#microsoft.graph.androidStoreApp',
+        '#microsoft.graph.androidLobApp',
+        '#microsoft.graph.androidForWorkApp',
+        '#microsoft.graph.managedIOSStoreApp',
+        '#microsoft.graph.managedAndroidStoreApp',
+        '#microsoft.graph.managedIOSLobApp',
+        '#microsoft.graph.managedAndroidLobApp',
+        '#microsoft.graph.microsoftStoreForBusinessApp',
+        '#microsoft.graph.macOSLobApp',
+        '#microsoft.graph.macOSOfficeSuiteApp',
+        '#microsoft.graph.macOSMicrosoftEdgeApp',
+        '#microsoft.graph.macOSDmgApp',
+        '#microsoft.graph.macOSPkgApp',
+      ]);
+
+      const result: Record<string, unknown> = {
+        app: {
+          id: app.id,
+          displayName: app.displayName,
+          odataType,
+          publishingState: app.publishingState,
+          isAssigned: app.isAssigned,
+        },
+      };
+
+      if (SUPPORTS_DEVICE_STATUSES.has(odataType)) {
+        const [deviceStatuses, userStatuses] = await Promise.all([
+          graph.get(`/deviceAppManagement/mobileApps/${appId}/deviceStatuses`, { $top: top }),
+          includeUserStatuses
+            ? graph.get(`/deviceAppManagement/mobileApps/${appId}/userStatuses`, { $top: top }).catch(() => null)
+            : Promise.resolve(null),
+        ]);
+        result.deviceStatuses = deviceStatuses;
+        if (includeUserStatuses && userStatuses !== null) result.userStatuses = userStatuses;
+      } else {
+        // MSIX/AppX (windowsUniversalAppX, windowsAppX), WinGet (winGetApp),
+        // webApp, windowsMicrosoftEdgeApp, etc. — use the Intune Reports API.
+        result.reportNote = `${odataType} does not support the deviceStatuses navigation property. Using Intune Reports API (response shape: { schema, values }).`;
+        try {
+          const report = await graph.post(
+            '/deviceAppManagement/reports/getDeviceInstallStatusReport',
+            {
+              filter: `(ApplicationId eq '${appId}')`,
+              select: [
+                'DeviceId', 'DeviceName', 'Platform', 'UserName', 'UserPrincipalName',
+                'InstallState', 'InstallStateDetail', 'ErrorCode',
+                'LastModifiedDateTime', 'AppVersion',
+              ],
+              skip: 0,
+              top,
+              orderBy: [],
+            }
+          );
+          result.deviceInstallStatusReport = report;
+        } catch {
+          // Last resort: show group assignments so the caller knows deployment targets
+          result.assignments = await graph.getAll(`/deviceAppManagement/mobileApps/${appId}/assignments`).catch(() => []);
+          result.reportNote += ' Reports API unavailable — showing assignments as fallback.';
+        }
+      }
+
+      // Aggregate summary available on most app types (not webApp / some edge cases)
+      try {
+        result.installSummary = await graph.get(`/deviceAppManagement/mobileApps/${appId}/installSummary`);
+      } catch {
+        // intentionally silent
+      }
+
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
   );
 
