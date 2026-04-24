@@ -178,9 +178,7 @@ async function downloadOneDriveItemToTempFile(
     ? `${driveBase}/items/${encodeURIComponent(itemId)}`
     : `${driveBase}/root:${encodeDrivePath(itemPath!)}`;
 
-  const meta = await graph.get<DriveItemMeta>(itemUrl, {
-    $select: 'id,name,size,file,folder,@microsoft.graph.downloadUrl',
-  });
+  const meta = await graph.get<DriveItemMeta>(itemUrl);
 
   if (meta.folder) {
     throw new Error(
