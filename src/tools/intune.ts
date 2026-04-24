@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as net from 'node:net';
+import * as crypto from 'node:crypto';
 import AdmZip from 'adm-zip';
 import * as yauzl from 'yauzl';
 import axios from 'axios';
@@ -816,6 +817,13 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
         logger.info('msix update: reading MSIX into memory', { sourcePath });
         const content = fs.readFileSync(sourcePath);
         logger.info('msix update: MSIX in memory', { bytes: content.length });
+        // Intune's commit action rejects unencrypted MSIX uploads without a
+        // fileEncryptionInfo block ("Invalid action parameters: does not
+        // include 'fileEncryptionInfo'"). We pass empty-string key material
+        // (no encryption) plus the SHA-256 digest of the uploaded bytes so
+        // the service can verify what we wrote to the Azure Blob.
+        const fileDigest = crypto.createHash('sha256').update(content).digest('base64');
+        logger.info('msix update: sha256 computed', { fileDigest });
 
         const versionId = await uploadAppContentVersion(
           graph,
@@ -824,8 +832,15 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
           content,
           effectiveName,
           content.length,
-          // No fileEncryptionInfo — MSIX uploads unencrypted, commit body is `{}`.
-          undefined,
+          {
+            encryptionKey: '',
+            macKey: '',
+            initializationVector: '',
+            mac: '',
+            profileIdentifier: 'ProfileVersion1',
+            fileDigest,
+            fileDigestAlgorithm: 'SHA256',
+          },
           manifestBase64,
         );
 
