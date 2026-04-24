@@ -165,14 +165,17 @@ interface DriveItemMeta {
  * Resolve a OneDrive file reference to a local temp file path by fetching its
  * DriveItem metadata for a short-lived pre-authenticated download URL, then
  * streaming the content through the same bounded writer used for plain URL
- * downloads (SSRF guard + MAX_DOWNLOAD_BYTES cap).
+ * downloads (SSRF guard + MAX_DOWNLOAD_BYTES cap). Returns the temp path and
+ * the original item name — callers that forward the file to another service
+ * (e.g. Intune's `mobileAppContentFile.name`) need the human-readable name
+ * instead of the `intunewin-<rand>.intunewin` tmp filename.
  */
 async function downloadOneDriveItemToTempFile(
   graph: GraphClient,
   userId: string,
   itemPath: string | undefined,
   itemId: string | undefined,
-): Promise<string> {
+): Promise<{ tmpPath: string; sourceName: string }> {
   const driveBase = `${userPath(userId)}/drive`;
   const itemUrl = itemId
     ? `${driveBase}/items/${encodeURIComponent(itemId)}`
@@ -191,7 +194,23 @@ async function downloadOneDriveItemToTempFile(
       `OneDrive item has no downloadUrl — not a downloadable file: ${itemPath ?? itemId}`,
     );
   }
-  return downloadToTempFile(downloadUrl);
+  const tmpPath = await downloadToTempFile(downloadUrl);
+  return { tmpPath, sourceName: meta.name ?? path.basename(itemPath ?? 'package') };
+}
+
+/**
+ * Extract AppxManifest.xml from an MSIX (or .appx) package and return its
+ * UTF-8 bytes base64-encoded. Intune's `mobileAppContentFile.manifest` is
+ * required for `windowsUniversalAppX` content — without it the files POST
+ * fails with a generic 400 BadRequest from the Stateless app metadata proxy.
+ */
+function readMsixAppxManifestBase64(msix: Buffer): string {
+  const zip = new AdmZip(msix);
+  const entry = zip.getEntry('AppxManifest.xml');
+  if (!entry) {
+    throw new Error('AppxManifest.xml not found at the MSIX package root');
+  }
+  return entry.getData().toString('base64');
 }
 
 const BLOB_BLOCK_SIZE = 4 * 1024 * 1024; // 4 MB per block
@@ -258,6 +277,7 @@ async function uploadAppContentVersion(
   fileName: string,
   unencryptedSize: number,
   fileEncryptionInfo?: Record<string, unknown>,
+  manifestBase64?: string,
 ): Promise<string> {
   const base = `/deviceAppManagement/mobileApps/${appId}/${appTypeSegment}`;
 
@@ -270,7 +290,7 @@ async function uploadAppContentVersion(
       name: fileName,
       size: unencryptedSize,
       sizeEncrypted: content.length,
-      manifest: null,
+      manifest: manifestBase64 ?? null,
       isDependency: false,
     },
   );
@@ -563,12 +583,12 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
         tmpPath = await downloadToTempFile(fileUrl);
         filePath = tmpPath;
       } else if (hasOneDrive) {
-        tmpPath = await downloadOneDriveItemToTempFile(
+        ({ tmpPath } = await downloadOneDriveItemToTempFile(
           graph,
           oneDriveUserId ?? 'me',
           oneDriveItemPath,
           oneDriveItemId,
-        );
+        ));
         filePath = tmpPath;
       }
       const info = parseIntuneWin(filePath!);
@@ -700,25 +720,35 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
 
       let tmpPath: string | undefined;
       let sourcePath: string;
+      // Default Intune-visible name follows the source. The .intunewin-looking
+      // tmp file name produced by downloadToTempFile is not a good default —
+      // Intune rejects content file entries whose extension does not match
+      // the underlying MSIX payload.
+      let defaultName: string;
       if (fileUrl) {
         tmpPath = await downloadToTempFile(fileUrl);
         sourcePath = tmpPath;
+        defaultName = path.basename(new URL(fileUrl).pathname) || 'package.msix';
       } else if (hasOneDrive) {
-        tmpPath = await downloadOneDriveItemToTempFile(
+        const dl = await downloadOneDriveItemToTempFile(
           graph,
           oneDriveUserId ?? 'me',
           oneDriveItemPath,
           oneDriveItemId,
         );
+        tmpPath = dl.tmpPath;
         sourcePath = tmpPath;
+        defaultName = dl.sourceName;
       } else {
         sourcePath = filePath!;
+        defaultName = path.basename(sourcePath);
       }
 
       try {
         if (!fs.existsSync(sourcePath)) throw new Error(`File not found: ${sourcePath}`);
         const content = fs.readFileSync(sourcePath);
-        const effectiveName = fileName ?? path.basename(sourcePath);
+        const effectiveName = fileName ?? defaultName;
+        const manifestBase64 = readMsixAppxManifestBase64(content);
 
         const versionId = await uploadAppContentVersion(
           graph,
@@ -728,6 +758,8 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
           effectiveName,
           content.length,
           // No fileEncryptionInfo — MSIX uploads unencrypted, commit body is `{}`.
+          undefined,
+          manifestBase64,
         );
 
         await graph.patch(`/deviceAppManagement/mobileApps/${encodeId(appId)}`, {
