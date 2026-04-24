@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { GraphClient } from '../graph/GraphClient';
+import { userPath } from './shared';
 
 export function registerCalendarTools(server: McpServer, graph: GraphClient) {
   server.tool(
@@ -8,7 +9,7 @@ export function registerCalendarTools(server: McpServer, graph: GraphClient) {
     'List calendars for a user.',
     { userId: z.string().default('me') },
     async ({ userId }) => {
-      const calendars = await graph.getAll(`/users/${encodeURIComponent(userId)}/calendars`);
+      const calendars = await graph.getAll(`${userPath(userId)}/calendars`);
       return { content: [{ type: 'text', text: JSON.stringify(calendars, null, 2) }] };
     }
   );
@@ -22,7 +23,7 @@ export function registerCalendarTools(server: McpServer, graph: GraphClient) {
       color: z.enum(['auto', 'lightBlue', 'lightGreen', 'lightOrange', 'lightGray', 'lightYellow', 'lightTeal', 'lightPink', 'lightBrown', 'lightRed', 'maxColor']).default('auto'),
     },
     async ({ userId, name, color }) => {
-      const calendar = await graph.post(`/users/${encodeURIComponent(userId)}/calendars`, { name, color });
+      const calendar = await graph.post(`${userPath(userId)}/calendars`, { name, color });
       return { content: [{ type: 'text', text: JSON.stringify(calendar, null, 2) }] };
     }
   );
@@ -41,8 +42,8 @@ export function registerCalendarTools(server: McpServer, graph: GraphClient) {
     },
     async ({ userId, calendarId, filter, select, top, startDateTime, endDateTime }) => {
       const base = calendarId
-        ? `/users/${encodeURIComponent(userId)}/calendars/${calendarId}`
-        : `/users/${encodeURIComponent(userId)}`;
+        ? `${userPath(userId)}/calendars/${encodeURIComponent(calendarId)}`
+        : userPath(userId);
 
       let url: string;
       const params: Record<string, unknown> = { $top: top };
@@ -71,7 +72,7 @@ export function registerCalendarTools(server: McpServer, graph: GraphClient) {
       eventId: z.string(),
     },
     async ({ userId, eventId }) => {
-      const event = await graph.get(`/users/${encodeURIComponent(userId)}/events/${eventId}`);
+      const event = await graph.get(`${userPath(userId)}/events/${encodeURIComponent(eventId)}`);
       return { content: [{ type: 'text', text: JSON.stringify(event, null, 2) }] };
     }
   );
@@ -116,8 +117,8 @@ export function registerCalendarTools(server: McpServer, graph: GraphClient) {
       }
 
       const base = calendarId
-        ? `/users/${encodeURIComponent(userId)}/calendars/${calendarId}`
-        : `/users/${encodeURIComponent(userId)}`;
+        ? `${userPath(userId)}/calendars/${encodeURIComponent(calendarId)}`
+        : userPath(userId);
       const event = await graph.post(`${base}/events`, eventBody);
       return { content: [{ type: 'text', text: JSON.stringify(event, null, 2) }] };
     }
@@ -148,7 +149,7 @@ export function registerCalendarTools(server: McpServer, graph: GraphClient) {
       if (location) patch.location = { displayName: location };
       if (isOnlineMeeting !== undefined) patch.isOnlineMeeting = isOnlineMeeting;
 
-      const event = await graph.patch(`/users/${encodeURIComponent(userId)}/events/${eventId}`, patch);
+      const event = await graph.patch(`${userPath(userId)}/events/${encodeURIComponent(eventId)}`, patch);
       return { content: [{ type: 'text', text: JSON.stringify(event, null, 2) }] };
     }
   );
@@ -158,7 +159,7 @@ export function registerCalendarTools(server: McpServer, graph: GraphClient) {
     'Delete a calendar event.',
     { userId: z.string().default('me'), eventId: z.string() },
     async ({ userId, eventId }) => {
-      await graph.delete(`/users/${encodeURIComponent(userId)}/events/${eventId}`);
+      await graph.delete(`${userPath(userId)}/events/${encodeURIComponent(eventId)}`);
       return { content: [{ type: 'text', text: 'Event deleted.' }] };
     }
   );

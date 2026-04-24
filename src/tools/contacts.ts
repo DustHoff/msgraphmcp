@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { GraphClient } from '../graph/GraphClient';
+import { userPath } from './shared';
 
 export function registerContactTools(server: McpServer, graph: GraphClient) {
   server.tool(
@@ -16,7 +17,7 @@ export function registerContactTools(server: McpServer, graph: GraphClient) {
       const params: Record<string, unknown> = { $top: top };
       if (filter) params['$filter'] = filter;
       if (select) params['$select'] = select;
-      const contacts = await graph.get(`/users/${encodeURIComponent(userId)}/contacts`, params);
+      const contacts = await graph.get(`${userPath(userId)}/contacts`, params);
       return { content: [{ type: 'text', text: JSON.stringify(contacts, null, 2) }] };
     }
   );
@@ -29,7 +30,7 @@ export function registerContactTools(server: McpServer, graph: GraphClient) {
       contactId: z.string(),
     },
     async ({ userId, contactId }) => {
-      const contact = await graph.get(`/users/${encodeURIComponent(userId)}/contacts/${contactId}`);
+      const contact = await graph.get(`${userPath(userId)}/contacts/${encodeURIComponent(contactId)}`);
       return { content: [{ type: 'text', text: JSON.stringify(contact, null, 2) }] };
     }
   );
@@ -61,7 +62,7 @@ export function registerContactTools(server: McpServer, graph: GraphClient) {
       if (companyName) body.companyName = companyName;
       if (department) body.department = department;
 
-      const contact = await graph.post(`/users/${encodeURIComponent(userId)}/contacts`, body);
+      const contact = await graph.post(`${userPath(userId)}/contacts`, body);
       return { content: [{ type: 'text', text: JSON.stringify(contact, null, 2) }] };
     }
   );
@@ -83,7 +84,10 @@ export function registerContactTools(server: McpServer, graph: GraphClient) {
     },
     async ({ userId, contactId, ...props }) => {
       const body = Object.fromEntries(Object.entries(props).filter(([, v]) => v !== undefined));
-      const contact = await graph.patch(`/users/${encodeURIComponent(userId)}/contacts/${contactId}`, body);
+      const contact = await graph.patch(
+        `${userPath(userId)}/contacts/${encodeURIComponent(contactId)}`,
+        body
+      );
       return { content: [{ type: 'text', text: JSON.stringify(contact, null, 2) }] };
     }
   );
@@ -96,7 +100,7 @@ export function registerContactTools(server: McpServer, graph: GraphClient) {
       contactId: z.string(),
     },
     async ({ userId, contactId }) => {
-      await graph.delete(`/users/${encodeURIComponent(userId)}/contacts/${contactId}`);
+      await graph.delete(`${userPath(userId)}/contacts/${encodeURIComponent(contactId)}`);
       return { content: [{ type: 'text', text: 'Contact deleted.' }] };
     }
   );

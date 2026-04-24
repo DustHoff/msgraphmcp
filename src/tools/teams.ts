@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { GraphClient } from '../graph/GraphClient';
+import { userPath } from './shared';
 
 export function registerTeamsTools(server: McpServer, graph: GraphClient) {
   server.tool(
@@ -8,7 +9,7 @@ export function registerTeamsTools(server: McpServer, graph: GraphClient) {
     'List Microsoft Teams the signed-in user has joined.',
     { userId: z.string().default('me') },
     async ({ userId }) => {
-      const teams = await graph.getAll(`/users/${encodeURIComponent(userId)}/joinedTeams`);
+      const teams = await graph.getAll(`${userPath(userId)}/joinedTeams`);
       return { content: [{ type: 'text', text: JSON.stringify(teams, null, 2) }] };
     }
   );

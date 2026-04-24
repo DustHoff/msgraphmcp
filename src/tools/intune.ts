@@ -3,9 +3,74 @@ import { z } from 'zod';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as net from 'node:net';
 import AdmZip from 'adm-zip';
 import axios from 'axios';
 import { GraphClient } from '../graph/GraphClient';
+import { odataQuote } from './shared';
+
+// Upper bound for server-side downloads of .intunewin packages. Guards against
+// an attacker (or misconfigured URL) draining the /tmp filesystem.
+const MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB — large LOB apps fit
+
+/**
+ * SSRF guard: reject URLs that target the host loopback, link-local metadata
+ * services (e.g. 169.254.169.254), or private RFC1918 ranges. Only http/https
+ * schemes are allowed — blocks file://, gopher://, ftp://, etc.
+ */
+function assertSafeDownloadUrl(rawUrl: string): void {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new Error(`Invalid fileUrl: ${rawUrl}`);
+  }
+
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`fileUrl scheme not allowed: ${url.protocol} — use http:// or https://`);
+  }
+
+  const host = url.hostname;
+  const ipFamily = net.isIP(host); // 0 = not an IP literal
+
+  // IP-literal check — block loopback, link-local, and private RFC1918 ranges
+  if (ipFamily !== 0) {
+    if (isPrivateOrLoopbackIp(host, ipFamily)) {
+      throw new Error(`fileUrl host is not allowed (private/loopback IP): ${host}`);
+    }
+    return;
+  }
+
+  // Hostname — reject the obvious internal names. DNS rebinding is not
+  // completely mitigated by name checks alone, but blocking these covers the
+  // common SSRF vectors without also blocking legitimate cloud hostnames.
+  const lower = host.toLowerCase();
+  if (lower === 'localhost' || lower.endsWith('.localhost') || lower === 'metadata.google.internal') {
+    throw new Error(`fileUrl host is not allowed: ${host}`);
+  }
+}
+
+function isPrivateOrLoopbackIp(ip: string, family: number): boolean {
+  if (family === 4) {
+    const parts = ip.split('.').map(p => parseInt(p, 10));
+    if (parts.length !== 4 || parts.some(p => Number.isNaN(p))) return false;
+    const [a, b] = parts;
+    return (
+      a === 10 ||                          // 10.0.0.0/8
+      (a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12
+      (a === 192 && b === 168) ||          // 192.168.0.0/16
+      a === 127 ||                         // 127.0.0.0/8 loopback
+      (a === 169 && b === 254) ||          // 169.254.0.0/16 link-local (cloud metadata)
+      a === 0 ||                           // 0.0.0.0/8
+      a >= 224                             // 224.0.0.0/4 multicast + reserved
+    );
+  }
+  // IPv6: reject loopback, link-local, unique-local, unspecified
+  const lower = ip.toLowerCase();
+  if (lower === '::1' || lower === '::') return true;
+  if (lower.startsWith('fe80:') || lower.startsWith('fc') || lower.startsWith('fd')) return true;
+  return false;
+}
 
 // ─── Win32 LOB upload helpers ─────────────────────────────────────────────────
 
@@ -52,15 +117,39 @@ function parseIntuneWin(filePath: string): IntuneWinInfo {
 }
 
 async function downloadToTempFile(url: string): Promise<string> {
+  assertSafeDownloadUrl(url);
   const tmpPath = path.join(os.tmpdir(), `intunewin-${Date.now()}-${Math.random().toString(36).slice(2)}.intunewin`);
-  const response = await axios.get<NodeJS.ReadableStream>(url, { responseType: 'stream' });
-  await new Promise<void>((resolve, reject) => {
-    const dest = fs.createWriteStream(tmpPath);
-    (response.data as NodeJS.ReadableStream).pipe(dest);
-    dest.on('finish', resolve);
-    dest.on('error', reject);
+  const response = await axios.get<NodeJS.ReadableStream>(url, {
+    responseType: 'stream',
+    maxRedirects: 5,
+    // Cap the download — axios enforces this after reading the response;
+    // the stream-level byte counter below enforces the same cap mid-stream.
+    maxContentLength: MAX_DOWNLOAD_BYTES,
   });
-  return tmpPath;
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const dest = fs.createWriteStream(tmpPath);
+      const stream = response.data as NodeJS.ReadableStream;
+      let bytes = 0;
+      stream.on('data', (chunk: Buffer) => {
+        bytes += chunk.length;
+        if (bytes > MAX_DOWNLOAD_BYTES) {
+          stream.pause();
+          dest.destroy();
+          reject(new Error(`Download exceeded ${MAX_DOWNLOAD_BYTES} bytes`));
+        }
+      });
+      stream.on('error', reject);
+      dest.on('finish', resolve);
+      dest.on('error', reject);
+      stream.pipe(dest);
+    });
+    return tmpPath;
+  } catch (err) {
+    fs.unlink(tmpPath, () => {});
+    throw err;
+  }
 }
 
 const BLOB_BLOCK_SIZE = 4 * 1024 * 1024; // 4 MB per block
@@ -572,7 +661,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
       result.deviceInstallStatusReport = await graph.post<Record<string, unknown>>(
         '/deviceManagement/reports/microsoft.graph.retrieveDeviceAppInstallationStatusReport',
         {
-          filter: `(ApplicationId eq '${appId}')`,
+          filter: `(ApplicationId eq '${odataQuote(appId)}')`,
           select: [
             'DeviceId', 'DeviceName', 'Platform', 'UserName', 'UserPrincipalName',
             'InstallState', 'InstallStateDetail', 'ErrorCode',
@@ -856,11 +945,15 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
       top: z.number().int().min(1).max(100).default(20),
     },
     async ({ keyword, platform, top }) => {
+      // OData $search on configurationSettings expects a double-quoted term.
+      // Stripping embedded double quotes is safer than trying to escape them —
+      // the API has no documented escape sequence for `"` inside $search.
+      const safeKeyword = keyword.replace(/"/g, '');
       const params: Record<string, unknown> = {
         $top: top,
-        $search: `"${keyword}"`,
+        $search: `"${safeKeyword}"`,
       };
-      if (platform) params['$filter'] = `platforms has '${platform}'`;
+      if (platform) params['$filter'] = `platforms has '${odataQuote(platform)}'`;
       const settings = await graph.beta.get('/deviceManagement/configurationSettings', params);
       return { content: [{ type: 'text', text: JSON.stringify(settings, null, 2) }] };
     }

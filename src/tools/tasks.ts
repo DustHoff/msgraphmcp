@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { GraphClient } from '../graph/GraphClient';
+import { userPath } from './shared';
 
 export function registerTaskTools(server: McpServer, graph: GraphClient) {
   server.tool(
@@ -8,7 +9,7 @@ export function registerTaskTools(server: McpServer, graph: GraphClient) {
     'List Microsoft To Do task lists for a user.',
     { userId: z.string().default('me') },
     async ({ userId }) => {
-      const lists = await graph.getAll(`/users/${encodeURIComponent(userId)}/todo/lists`);
+      const lists = await graph.getAll(`${userPath(userId)}/todo/lists`);
       return { content: [{ type: 'text', text: JSON.stringify(lists, null, 2) }] };
     }
   );
@@ -21,7 +22,7 @@ export function registerTaskTools(server: McpServer, graph: GraphClient) {
       displayName: z.string(),
     },
     async ({ userId, displayName }) => {
-      const list = await graph.post(`/users/${encodeURIComponent(userId)}/todo/lists`, { displayName });
+      const list = await graph.post(`${userPath(userId)}/todo/lists`, { displayName });
       return { content: [{ type: 'text', text: JSON.stringify(list, null, 2) }] };
     }
   );
@@ -34,7 +35,7 @@ export function registerTaskTools(server: McpServer, graph: GraphClient) {
       listId: z.string(),
     },
     async ({ userId, listId }) => {
-      await graph.delete(`/users/${encodeURIComponent(userId)}/todo/lists/${listId}`);
+      await graph.delete(`${userPath(userId)}/todo/lists/${encodeURIComponent(listId)}`);
       return { content: [{ type: 'text', text: 'Task list deleted.' }] };
     }
   );
@@ -52,7 +53,7 @@ export function registerTaskTools(server: McpServer, graph: GraphClient) {
       const params: Record<string, unknown> = { $top: top };
       if (filter) params['$filter'] = filter;
       const tasks = await graph.get(
-        `/users/${encodeURIComponent(userId)}/todo/lists/${listId}/tasks`,
+        `${userPath(userId)}/todo/lists/${encodeURIComponent(listId)}/tasks`,
         params
       );
       return { content: [{ type: 'text', text: JSON.stringify(tasks, null, 2) }] };
@@ -81,7 +82,7 @@ export function registerTaskTools(server: McpServer, graph: GraphClient) {
       }
 
       const task = await graph.post(
-        `/users/${encodeURIComponent(userId)}/todo/lists/${listId}/tasks`,
+        `${userPath(userId)}/todo/lists/${encodeURIComponent(listId)}/tasks`,
         taskBody
       );
       return { content: [{ type: 'text', text: JSON.stringify(task, null, 2) }] };
@@ -110,7 +111,7 @@ export function registerTaskTools(server: McpServer, graph: GraphClient) {
       if (status) patch.status = status;
 
       const task = await graph.patch(
-        `/users/${encodeURIComponent(userId)}/todo/lists/${listId}/tasks/${taskId}`,
+        `${userPath(userId)}/todo/lists/${encodeURIComponent(listId)}/tasks/${encodeURIComponent(taskId)}`,
         patch
       );
       return { content: [{ type: 'text', text: JSON.stringify(task, null, 2) }] };
@@ -127,7 +128,7 @@ export function registerTaskTools(server: McpServer, graph: GraphClient) {
     },
     async ({ userId, listId, taskId }) => {
       const task = await graph.patch(
-        `/users/${encodeURIComponent(userId)}/todo/lists/${listId}/tasks/${taskId}`,
+        `${userPath(userId)}/todo/lists/${encodeURIComponent(listId)}/tasks/${encodeURIComponent(taskId)}`,
         { status: 'completed' }
       );
       return { content: [{ type: 'text', text: JSON.stringify(task, null, 2) }] };
@@ -143,7 +144,9 @@ export function registerTaskTools(server: McpServer, graph: GraphClient) {
       taskId: z.string(),
     },
     async ({ userId, listId, taskId }) => {
-      await graph.delete(`/users/${encodeURIComponent(userId)}/todo/lists/${listId}/tasks/${taskId}`);
+      await graph.delete(
+        `${userPath(userId)}/todo/lists/${encodeURIComponent(listId)}/tasks/${encodeURIComponent(taskId)}`
+      );
       return { content: [{ type: 'text', text: 'Task deleted.' }] };
     }
   );

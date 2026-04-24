@@ -10,6 +10,29 @@ const DEBUG = process.env.GRAPH_DEBUG !== 'false';
 // Relevant MS Graph response headers for diagnostics
 const DEBUG_RESPONSE_HEADERS = ['request-id', 'client-request-id', 'x-ms-ags-diagnostic', 'odata-version'];
 
+// Keys whose values must never appear in debug logs — credentials, tokens,
+// secrets, private keys, etc. Match is case-insensitive and substring-based
+// so we catch nested fields like `passwordProfile.password`, `clientSecret`,
+// `accessToken`, `refreshToken`, `privateKey`, etc.
+const SENSITIVE_KEY_PATTERN = /password|secret|token|credential|private[-_]?key|apikey|api[-_]key/i;
+const REDACTED = '***REDACTED***';
+
+function redactSensitive(value: unknown): unknown {
+  if (value === null || value === undefined) return value;
+  if (Array.isArray(value)) return value.map(redactSensitive);
+  if (typeof value !== 'object') return value;
+
+  const out: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+    if (SENSITIVE_KEY_PATTERN.test(key)) {
+      out[key] = typeof val === 'string' || typeof val === 'number' ? REDACTED : redactSensitive(val);
+    } else {
+      out[key] = redactSensitive(val);
+    }
+  }
+  return out;
+}
+
 interface TimedRequestConfig extends InternalAxiosRequestConfig {
   _startMs?: number;
   _retried?: boolean;
@@ -45,7 +68,9 @@ function createAxiosInstance(
     }
     const accountInfo = await tokenManager.getAccountInfo().catch(() => null);
     config.headers.Authorization = `Bearer ${token}`;
-    config.headers['Content-Type'] = 'application/json';
+    if (!config.headers['Content-Type']) {
+      config.headers['Content-Type'] = 'application/json';
+    }
     config._startMs = Date.now();
     config._user = accountInfo?.upn ?? 'unknown';
 
@@ -55,7 +80,7 @@ function createAxiosInstance(
         method: config.method?.toUpperCase(),
         url: config.url,
         ...(config.params && { params: config.params }),
-        ...(config.data !== undefined && { body: config.data }),
+        ...(config.data !== undefined && { body: redactSensitive(config.data) }),
       });
     }
 
@@ -82,7 +107,7 @@ function createAxiosInstance(
           url: cfg.url,
           status: res.status,
           headers: pickHeaders(res.headers as Record<string, unknown>, DEBUG_RESPONSE_HEADERS),
-          body: res.data,
+          body: redactSensitive(res.data),
         });
       }
 
@@ -118,7 +143,7 @@ function createAxiosInstance(
         status,
         message: msg,
         ...(duration !== undefined && { durationMs: duration }),
-        ...(DEBUG && error.response?.data && { responseBody: error.response.data }),
+        ...(DEBUG && error.response?.data && { responseBody: redactSensitive(error.response.data) }),
         ...(DEBUG && error.response?.headers && {
           headers: pickHeaders(error.response.headers as Record<string, unknown>, DEBUG_RESPONSE_HEADERS),
         }),
@@ -150,18 +175,18 @@ export class GraphClient {
     return { authenticated: false, mode, loginUrl: this._getLoginUrl?.() };
   }
 
-  async get<T = unknown>(url: string, params?: Record<string, unknown>): Promise<T> {
-    const res: AxiosResponse<T> = await this.http.get(url, { params });
+  async get<T = unknown>(url: string, params?: Record<string, unknown>, config?: AxiosRequestConfig): Promise<T> {
+    const res: AxiosResponse<T> = await this.http.get(url, { ...config, params });
     return res.data;
   }
 
-  async getAll<T = unknown>(url: string, params?: Record<string, unknown>): Promise<T[]> {
+  async getAll<T = unknown>(url: string, params?: Record<string, unknown>, config?: AxiosRequestConfig): Promise<T[]> {
     const results: T[] = [];
     let nextUrl: string | undefined = url;
     let queryParams: Record<string, unknown> | undefined = params;
 
     while (nextUrl) {
-      const data: { value: T[]; '@odata.nextLink'?: string } = await this.get(nextUrl, queryParams);
+      const data: { value: T[]; '@odata.nextLink'?: string } = await this.get(nextUrl, queryParams, config);
       results.push(...(data.value ?? []));
       nextUrl = data['@odata.nextLink'];
       queryParams = undefined;
@@ -175,8 +200,8 @@ export class GraphClient {
     return res.data;
   }
 
-  async patch<T = unknown>(url: string, body: unknown): Promise<T> {
-    const res: AxiosResponse<T> = await this.http.patch(url, body);
+  async patch<T = unknown>(url: string, body: unknown, config?: AxiosRequestConfig): Promise<T> {
+    const res: AxiosResponse<T> = await this.http.patch(url, body, config);
     return res.data;
   }
 
@@ -185,8 +210,8 @@ export class GraphClient {
     return res.data;
   }
 
-  async delete(url: string): Promise<void> {
-    await this.http.delete(url);
+  async delete(url: string, config?: AxiosRequestConfig): Promise<void> {
+    await this.http.delete(url, config);
   }
 }
 
@@ -197,18 +222,18 @@ class BetaClient {
     this.http = createAxiosInstance(GRAPH_BETA, 'graph(beta)', tokenManager, getLoginUrl);
   }
 
-  async get<T = unknown>(url: string, params?: Record<string, unknown>): Promise<T> {
-    const res: AxiosResponse<T> = await this.http.get(url, { params });
+  async get<T = unknown>(url: string, params?: Record<string, unknown>, config?: AxiosRequestConfig): Promise<T> {
+    const res: AxiosResponse<T> = await this.http.get(url, { ...config, params });
     return res.data;
   }
 
-  async getAll<T = unknown>(url: string, params?: Record<string, unknown>): Promise<T[]> {
+  async getAll<T = unknown>(url: string, params?: Record<string, unknown>, config?: AxiosRequestConfig): Promise<T[]> {
     const results: T[] = [];
     let nextUrl: string | undefined = url;
     let queryParams: Record<string, unknown> | undefined = params;
 
     while (nextUrl) {
-      const data: { value: T[]; '@odata.nextLink'?: string } = await this.get(nextUrl, queryParams);
+      const data: { value: T[]; '@odata.nextLink'?: string } = await this.get(nextUrl, queryParams, config);
       results.push(...(data.value ?? []));
       nextUrl = data['@odata.nextLink'];
       queryParams = undefined;
@@ -222,12 +247,17 @@ class BetaClient {
     return res.data;
   }
 
-  async patch<T = unknown>(url: string, body: unknown): Promise<T> {
-    const res: AxiosResponse<T> = await this.http.patch(url, body);
+  async patch<T = unknown>(url: string, body: unknown, config?: AxiosRequestConfig): Promise<T> {
+    const res: AxiosResponse<T> = await this.http.patch(url, body, config);
     return res.data;
   }
 
-  async delete(url: string): Promise<void> {
-    await this.http.delete(url);
+  async put<T = unknown>(url: string, body: unknown, config?: AxiosRequestConfig): Promise<T> {
+    const res: AxiosResponse<T> = await this.http.put(url, body, config);
+    return res.data;
+  }
+
+  async delete(url: string, config?: AxiosRequestConfig): Promise<void> {
+    await this.http.delete(url, config);
   }
 }

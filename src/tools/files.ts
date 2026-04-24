@@ -1,6 +1,18 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { GraphClient } from '../graph/GraphClient';
+import { userPath, odataQuote } from './shared';
+
+/**
+ * Encode a OneDrive/SharePoint path for inclusion between `root:` and `:`
+ * markers. The path is encoded segment-by-segment so that `/` separators
+ * stay intact while spaces, `#`, `?`, `%`, etc. are percent-encoded.
+ * Ensures the path is absolute (leading `/`).
+ */
+function encodeDrivePath(path: string): string {
+  const normalized = path.startsWith('/') ? path : `/${path}`;
+  return normalized.split('/').map(encodeURIComponent).join('/');
+}
 
 export function registerFileTools(server: McpServer, graph: GraphClient) {
   server.tool(
@@ -12,10 +24,10 @@ export function registerFileTools(server: McpServer, graph: GraphClient) {
       top: z.number().int().min(1).max(999).default(50),
     },
     async ({ userId, itemPath, top }) => {
-      const driveBase = `/users/${encodeURIComponent(userId)}/drive`;
+      const driveBase = `${userPath(userId)}/drive`;
       const url = itemPath === '/'
         ? `${driveBase}/root/children`
-        : `${driveBase}/root:${itemPath}:/children`;
+        : `${driveBase}/root:${encodeDrivePath(itemPath)}:/children`;
       const items = await graph.get(url, { $top: top });
       return { content: [{ type: 'text', text: JSON.stringify(items, null, 2) }] };
     }
@@ -30,10 +42,13 @@ export function registerFileTools(server: McpServer, graph: GraphClient) {
       itemId: z.string().optional().describe('Item id (alternative to itemPath)'),
     },
     async ({ userId, itemPath, itemId }) => {
-      const driveBase = `/users/${encodeURIComponent(userId)}/drive`;
+      if (!itemPath && !itemId) {
+        throw new Error('Either itemPath or itemId must be provided.');
+      }
+      const driveBase = `${userPath(userId)}/drive`;
       const url = itemId
-        ? `${driveBase}/items/${itemId}`
-        : `${driveBase}/root:${itemPath}`;
+        ? `${driveBase}/items/${encodeURIComponent(itemId)}`
+        : `${driveBase}/root:${encodeDrivePath(itemPath!)}`;
       const item = await graph.get(url);
       return { content: [{ type: 'text', text: JSON.stringify(item, null, 2) }] };
     }
@@ -49,10 +64,10 @@ export function registerFileTools(server: McpServer, graph: GraphClient) {
       conflictBehavior: z.enum(['rename', 'fail', 'replace']).default('rename'),
     },
     async ({ userId, parentPath, folderName, conflictBehavior }) => {
-      const driveBase = `/users/${encodeURIComponent(userId)}/drive`;
+      const driveBase = `${userPath(userId)}/drive`;
       const url = parentPath === '/'
         ? `${driveBase}/root/children`
-        : `${driveBase}/root:${parentPath}:/children`;
+        : `${driveBase}/root:${encodeDrivePath(parentPath)}:/children`;
       const folder = await graph.post(url, {
         name: folderName,
         folder: {},
@@ -72,7 +87,7 @@ export function registerFileTools(server: McpServer, graph: GraphClient) {
       conflictBehavior: z.enum(['rename', 'fail', 'replace']).default('replace'),
     },
     async ({ userId, filePath, content, conflictBehavior }) => {
-      const url = `/users/${encodeURIComponent(userId)}/drive/root:${filePath}:/content`;
+      const url = `${userPath(userId)}/drive/root:${encodeDrivePath(filePath)}:/content`;
       const item = await graph.put(url, content, {
         params: { '@microsoft.graph.conflictBehavior': conflictBehavior },
         headers: { 'Content-Type': 'text/plain' },
@@ -90,10 +105,13 @@ export function registerFileTools(server: McpServer, graph: GraphClient) {
       itemId: z.string().optional(),
     },
     async ({ userId, itemPath, itemId }) => {
-      const driveBase = `/users/${encodeURIComponent(userId)}/drive`;
+      if (!itemPath && !itemId) {
+        throw new Error('Either itemPath or itemId must be provided.');
+      }
+      const driveBase = `${userPath(userId)}/drive`;
       const url = itemId
-        ? `${driveBase}/items/${itemId}`
-        : `${driveBase}/root:${itemPath}`;
+        ? `${driveBase}/items/${encodeURIComponent(itemId)}`
+        : `${driveBase}/root:${encodeDrivePath(itemPath!)}`;
       await graph.delete(url);
       return { content: [{ type: 'text', text: 'Item deleted.' }] };
     }
@@ -114,7 +132,7 @@ export function registerFileTools(server: McpServer, graph: GraphClient) {
       };
       if (newName) body.name = newName;
       const result = await graph.post(
-        `/users/${encodeURIComponent(userId)}/drive/items/${itemId}/copy`,
+        `${userPath(userId)}/drive/items/${encodeURIComponent(itemId)}/copy`,
         body
       );
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
@@ -130,8 +148,12 @@ export function registerFileTools(server: McpServer, graph: GraphClient) {
       top: z.number().int().min(1).max(200).default(25),
     },
     async ({ userId, query, top }) => {
+      // Single quotes inside OData string literals are escaped by doubling
+      // per the OData spec. Without this, a query containing `'` would
+      // truncate the expression and return an error or unintended results.
+      const quoted = encodeURIComponent(odataQuote(query));
       const results = await graph.get(
-        `/users/${encodeURIComponent(userId)}/drive/root/search(q='${encodeURIComponent(query)}')`,
+        `${userPath(userId)}/drive/root/search(q='${quoted}')`,
         { $top: top }
       );
       return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
@@ -143,7 +165,7 @@ export function registerFileTools(server: McpServer, graph: GraphClient) {
     'List OneDrive items shared with the signed-in user.',
     { userId: z.string().default('me') },
     async ({ userId }) => {
-      const items = await graph.getAll(`/users/${encodeURIComponent(userId)}/drive/sharedWithMe`);
+      const items = await graph.getAll(`${userPath(userId)}/drive/sharedWithMe`);
       return { content: [{ type: 'text', text: JSON.stringify(items, null, 2) }] };
     }
   );

@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { GraphClient } from '../graph/GraphClient';
+import { userPath, needsEventualConsistency } from './shared';
 
 export function registerUserTools(server: McpServer, graph: GraphClient) {
   server.tool(
@@ -19,10 +20,12 @@ export function registerUserTools(server: McpServer, graph: GraphClient) {
       if (top) params['$top'] = top;
       if (search) {
         params['$search'] = search;
-        // search requires ConsistencyLevel header – handled via $count
         params['$count'] = true;
       }
-      const users = await graph.getAll('/users', params);
+      const config = needsEventualConsistency(params)
+        ? { headers: { ConsistencyLevel: 'eventual' } }
+        : undefined;
+      const users = await graph.getAll('/users', params, config);
       return { content: [{ type: 'text', text: JSON.stringify(users, null, 2) }] };
     }
   );
@@ -36,7 +39,7 @@ export function registerUserTools(server: McpServer, graph: GraphClient) {
     },
     async ({ userId, select }) => {
       const params = select ? { $select: select } : undefined;
-      const user = await graph.get(`/users/${encodeURIComponent(userId)}`, params);
+      const user = await graph.get(userPath(userId), params);
       return { content: [{ type: 'text', text: JSON.stringify(user, null, 2) }] };
     }
   );
@@ -79,7 +82,7 @@ export function registerUserTools(server: McpServer, graph: GraphClient) {
     'update_user',
     'Update properties of a user.',
     {
-      userId: z.string().describe('User id or userPrincipalName'),
+      userId: z.string().describe('User id or userPrincipalName. Use "me" for the signed-in user.'),
       displayName: z.string().optional(),
       givenName: z.string().optional(),
       surname: z.string().optional(),
@@ -92,7 +95,7 @@ export function registerUserTools(server: McpServer, graph: GraphClient) {
     },
     async ({ userId, ...props }) => {
       const body = Object.fromEntries(Object.entries(props).filter(([, v]) => v !== undefined));
-      await graph.patch(`/users/${encodeURIComponent(userId)}`, body);
+      await graph.patch(userPath(userId), body);
       return { content: [{ type: 'text', text: `User ${userId} updated successfully.` }] };
     }
   );
@@ -102,7 +105,7 @@ export function registerUserTools(server: McpServer, graph: GraphClient) {
     'Delete a user from the directory.',
     { userId: z.string().describe('User id or userPrincipalName') },
     async ({ userId }) => {
-      await graph.delete(`/users/${encodeURIComponent(userId)}`);
+      await graph.delete(userPath(userId));
       return { content: [{ type: 'text', text: `User ${userId} deleted.` }] };
     }
   );
@@ -114,7 +117,7 @@ export function registerUserTools(server: McpServer, graph: GraphClient) {
       userId: z.string().describe('User id or userPrincipalName. Use "me" for the signed-in user.'),
     },
     async ({ userId }) => {
-      const groups = await graph.getAll(`/users/${encodeURIComponent(userId)}/memberOf`);
+      const groups = await graph.getAll(`${userPath(userId)}/memberOf`);
       return { content: [{ type: 'text', text: JSON.stringify(groups, null, 2) }] };
     }
   );
@@ -128,7 +131,7 @@ export function registerUserTools(server: McpServer, graph: GraphClient) {
       forceChangePasswordNextSignIn: z.boolean().default(true),
     },
     async ({ userId, newPassword, forceChangePasswordNextSignIn }) => {
-      await graph.patch(`/users/${encodeURIComponent(userId)}`, {
+      await graph.patch(userPath(userId), {
         passwordProfile: { password: newPassword, forceChangePasswordNextSignIn },
       });
       return { content: [{ type: 'text', text: `Password for ${userId} reset successfully.` }] };

@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { GraphClient } from '../graph/GraphClient';
+import { needsEventualConsistency } from './shared';
 
 export function registerGroupTools(server: McpServer, graph: GraphClient) {
   server.tool(
@@ -16,8 +17,14 @@ export function registerGroupTools(server: McpServer, graph: GraphClient) {
       const params: Record<string, unknown> = { $top: top };
       if (filter) params['$filter'] = filter;
       if (select) params['$select'] = select;
-      if (search) params['$search'] = search;
-      const groups = await graph.get('/groups', params);
+      if (search) {
+        params['$search'] = search;
+        params['$count'] = true;
+      }
+      const config = needsEventualConsistency(params)
+        ? { headers: { ConsistencyLevel: 'eventual' } }
+        : undefined;
+      const groups = await graph.get('/groups', params, config);
       return { content: [{ type: 'text', text: JSON.stringify(groups, null, 2) }] };
     }
   );
@@ -71,7 +78,7 @@ export function registerGroupTools(server: McpServer, graph: GraphClient) {
       groupId: z.string(),
       displayName: z.string().optional(),
       description: z.string().optional(),
-      visibility: z.enum(['Public', 'Private']).optional(),
+      visibility: z.enum(['Public', 'Private', 'HiddenMembership']).optional(),
       mailNickname: z.string().optional(),
     },
     async ({ groupId, ...props }) => {

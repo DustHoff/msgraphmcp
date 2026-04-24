@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { GraphClient } from '../graph/GraphClient';
+import { userPath } from './shared';
 
 const recipientSchema = z.object({
   name: z.string().optional(),
@@ -25,7 +26,7 @@ export function registerMailTools(server: McpServer, graph: GraphClient) {
       if (select) params['$select'] = select;
       if (search) params['$search'] = search;
       const messages = await graph.get(
-        `/users/${encodeURIComponent(userId)}/mailFolders/${folderId}/messages`,
+        `${userPath(userId)}/mailFolders/${encodeURIComponent(folderId)}/messages`,
         params
       );
       return { content: [{ type: 'text', text: JSON.stringify(messages, null, 2) }] };
@@ -40,7 +41,7 @@ export function registerMailTools(server: McpServer, graph: GraphClient) {
       messageId: z.string(),
     },
     async ({ userId, messageId }) => {
-      const msg = await graph.get(`/users/${encodeURIComponent(userId)}/messages/${messageId}`);
+      const msg = await graph.get(`${userPath(userId)}/messages/${encodeURIComponent(messageId)}`);
       return { content: [{ type: 'text', text: JSON.stringify(msg, null, 2) }] };
     }
   );
@@ -68,7 +69,7 @@ export function registerMailTools(server: McpServer, graph: GraphClient) {
       if (ccRecipients?.length) message.ccRecipients = ccRecipients.map(toAddr);
       if (bccRecipients?.length) message.bccRecipients = bccRecipients.map(toAddr);
 
-      await graph.post(`/users/${encodeURIComponent(userId)}/sendMail`, { message, saveToSentItems });
+      await graph.post(`${userPath(userId)}/sendMail`, { message, saveToSentItems });
       return { content: [{ type: 'text', text: 'Mail sent successfully.' }] };
     }
   );
@@ -82,7 +83,7 @@ export function registerMailTools(server: McpServer, graph: GraphClient) {
       comment: z.string().describe('Reply body text'),
     },
     async ({ userId, messageId, comment }) => {
-      await graph.post(`/users/${encodeURIComponent(userId)}/messages/${messageId}/reply`, { comment });
+      await graph.post(`${userPath(userId)}/messages/${encodeURIComponent(messageId)}/reply`, { comment });
       return { content: [{ type: 'text', text: 'Reply sent.' }] };
     }
   );
@@ -100,7 +101,7 @@ export function registerMailTools(server: McpServer, graph: GraphClient) {
       const toAddr = (r: { name?: string; address: string }) => ({ emailAddress: { name: r.name, address: r.address } });
       const body: Record<string, unknown> = { toRecipients: toRecipients.map(toAddr) };
       if (comment) body.comment = comment;
-      await graph.post(`/users/${encodeURIComponent(userId)}/messages/${messageId}/forward`, body);
+      await graph.post(`${userPath(userId)}/messages/${encodeURIComponent(messageId)}/forward`, body);
       return { content: [{ type: 'text', text: 'Message forwarded.' }] };
     }
   );
@@ -113,7 +114,7 @@ export function registerMailTools(server: McpServer, graph: GraphClient) {
       messageId: z.string(),
     },
     async ({ userId, messageId }) => {
-      await graph.delete(`/users/${encodeURIComponent(userId)}/messages/${messageId}`);
+      await graph.delete(`${userPath(userId)}/messages/${encodeURIComponent(messageId)}`);
       return { content: [{ type: 'text', text: 'Message deleted.' }] };
     }
   );
@@ -128,7 +129,7 @@ export function registerMailTools(server: McpServer, graph: GraphClient) {
     },
     async ({ userId, messageId, destinationFolderId }) => {
       const msg = await graph.post(
-        `/users/${encodeURIComponent(userId)}/messages/${messageId}/move`,
+        `${userPath(userId)}/messages/${encodeURIComponent(messageId)}/move`,
         { destinationId: destinationFolderId }
       );
       return { content: [{ type: 'text', text: JSON.stringify(msg, null, 2) }] };
@@ -144,7 +145,7 @@ export function registerMailTools(server: McpServer, graph: GraphClient) {
     },
     async ({ userId, includeHiddenFolders }) => {
       const folders = await graph.getAll(
-        `/users/${encodeURIComponent(userId)}/mailFolders`,
+        `${userPath(userId)}/mailFolders`,
         includeHiddenFolders ? { includeHiddenFolders: true } : undefined
       );
       return { content: [{ type: 'text', text: JSON.stringify(folders, null, 2) }] };
@@ -161,8 +162,8 @@ export function registerMailTools(server: McpServer, graph: GraphClient) {
     },
     async ({ userId, displayName, parentFolderId }) => {
       const url = parentFolderId
-        ? `/users/${encodeURIComponent(userId)}/mailFolders/${parentFolderId}/childFolders`
-        : `/users/${encodeURIComponent(userId)}/mailFolders`;
+        ? `${userPath(userId)}/mailFolders/${encodeURIComponent(parentFolderId)}/childFolders`
+        : `${userPath(userId)}/mailFolders`;
       const folder = await graph.post(url, { displayName });
       return { content: [{ type: 'text', text: JSON.stringify(folder, null, 2) }] };
     }
