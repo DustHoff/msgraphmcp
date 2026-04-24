@@ -8,6 +8,7 @@ import AdmZip from 'adm-zip';
 import axios from 'axios';
 import { GraphClient } from '../graph/GraphClient';
 import { encodeId, odataQuote, userPath, encodeDrivePath } from './shared';
+import { logger } from '../logger';
 
 // Upper bound for server-side downloads of .intunewin packages. Guards against
 // an attacker (or misconfigured URL) draining the /tmp filesystem.
@@ -119,13 +120,28 @@ function parseIntuneWin(filePath: string): IntuneWinInfo {
 async function downloadToTempFile(url: string): Promise<string> {
   assertSafeDownloadUrl(url);
   const tmpPath = path.join(os.tmpdir(), `intunewin-${Date.now()}-${Math.random().toString(36).slice(2)}.intunewin`);
+  logger.info('download: starting', { tmpPath });
+  // Abort the download if we see no progress for a full minute — stalled
+  // SharePoint connections would otherwise hang the handler forever.
+  const abortCtrl = new AbortController();
+  let stallTimer: NodeJS.Timeout | undefined;
+  const resetStall = () => {
+    if (stallTimer) clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => {
+      logger.error('download: stalled (no progress 60s), aborting');
+      abortCtrl.abort();
+    }, 60_000);
+  };
+
   const response = await axios.get<NodeJS.ReadableStream>(url, {
     responseType: 'stream',
     maxRedirects: 5,
-    // Cap the download — axios enforces this after reading the response;
-    // the stream-level byte counter below enforces the same cap mid-stream.
     maxContentLength: MAX_DOWNLOAD_BYTES,
+    signal: abortCtrl.signal,
+    timeout: 60_000, // connection/initial-response timeout
   });
+  logger.info('download: response received', { status: response.status });
+  resetStall();
 
   try {
     await new Promise<void>((resolve, reject) => {
@@ -138,15 +154,22 @@ async function downloadToTempFile(url: string): Promise<string> {
           stream.pause();
           dest.destroy();
           reject(new Error(`Download exceeded ${MAX_DOWNLOAD_BYTES} bytes`));
+          return;
         }
+        resetStall();
       });
       stream.on('error', reject);
-      dest.on('finish', resolve);
+      dest.on('finish', () => {
+        if (stallTimer) clearTimeout(stallTimer);
+        logger.info('download: complete', { bytes, tmpPath });
+        resolve();
+      });
       dest.on('error', reject);
       stream.pipe(dest);
     });
     return tmpPath;
   } catch (err) {
+    if (stallTimer) clearTimeout(stallTimer);
     fs.unlink(tmpPath, () => {});
     throw err;
   }
@@ -199,13 +222,15 @@ async function downloadOneDriveItemToTempFile(
 }
 
 /**
- * Extract AppxManifest.xml from an MSIX (or .appx) package and return its
- * UTF-8 bytes base64-encoded. Intune's `mobileAppContentFile.manifest` is
+ * Extract AppxManifest.xml from an MSIX (or .appx) package on disk and return
+ * its UTF-8 bytes base64-encoded. Intune's `mobileAppContentFile.manifest` is
  * required for `windowsUniversalAppX` content — without it the files POST
  * fails with a generic 400 BadRequest from the Stateless app metadata proxy.
+ * Reads directly from the file path so we do not hold the full MSIX buffer in
+ * memory twice (once for the AdmZip parser and again for the blob upload).
  */
-function readMsixAppxManifestBase64(msix: Buffer): string {
-  const zip = new AdmZip(msix);
+function readMsixAppxManifestBase64FromFile(msixPath: string): string {
+  const zip = new AdmZip(msixPath);
   const entry = zip.getEntry('AppxManifest.xml');
   if (!entry) {
     throw new Error('AppxManifest.xml not found at the MSIX package root');
@@ -218,6 +243,7 @@ const BLOB_BLOCK_SIZE = 4 * 1024 * 1024; // 4 MB per block
 async function uploadBlobBlocks(sasUri: string, data: Buffer): Promise<void> {
   const blockIds: string[] = [];
   const blockCount = Math.ceil(data.length / BLOB_BLOCK_SIZE);
+  logger.info('blob upload: starting', { bytes: data.length, blockCount });
 
   for (let i = 0; i < blockCount; i++) {
     const blockId = Buffer.from(String(i).padStart(6, '0')).toString('base64');
@@ -225,8 +251,15 @@ async function uploadBlobBlocks(sasUri: string, data: Buffer): Promise<void> {
     await axios.put(
       `${sasUri}&comp=block&blockid=${encodeURIComponent(blockId)}`,
       data.subarray(i * BLOB_BLOCK_SIZE, Math.min((i + 1) * BLOB_BLOCK_SIZE, data.length)),
-      { headers: { 'Content-Type': 'application/octet-stream' }, maxBodyLength: Infinity },
+      {
+        headers: { 'Content-Type': 'application/octet-stream' },
+        maxBodyLength: Infinity,
+        timeout: 120_000,
+      },
     );
+    if (i === 0 || i === blockCount - 1 || i % 10 === 0) {
+      logger.info('blob upload: progress', { block: i + 1, of: blockCount });
+    }
   }
 
   const blockListXml = `<?xml version="1.0" encoding="utf-8"?><BlockList>${
@@ -746,9 +779,13 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
 
       try {
         if (!fs.existsSync(sourcePath)) throw new Error(`File not found: ${sourcePath}`);
-        const content = fs.readFileSync(sourcePath);
         const effectiveName = fileName ?? defaultName;
-        const manifestBase64 = readMsixAppxManifestBase64(content);
+        logger.info('msix update: extracting AppxManifest.xml', { sourcePath });
+        const manifestBase64 = readMsixAppxManifestBase64FromFile(sourcePath);
+        logger.info('msix update: manifest extracted', { manifestBytes: manifestBase64.length });
+        logger.info('msix update: reading MSIX into memory', { sourcePath });
+        const content = fs.readFileSync(sourcePath);
+        logger.info('msix update: MSIX in memory', { bytes: content.length });
 
         const versionId = await uploadAppContentVersion(
           graph,
