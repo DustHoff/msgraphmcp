@@ -401,6 +401,8 @@ The refresh token typically lasts **90 days**. If it expires, the device code pr
 All tools accept `userId: string` parameters that default to `"me"` (the signed-in user) unless noted.  
 Parameters marked *optional* can be omitted.
 
+> All ids used in examples below (`00000000-0000-0000-0000-...`, `grp-id`, …) are placeholders — never substitute real tenant, user, group or app ids into the documentation.
+
 ### Users
 
 | Tool | Description | Key Parameters |
@@ -570,6 +572,7 @@ create_event subject="Sprint Review" startDateTime="2024-06-14T14:00:00" endDate
 | `update_intune_app` | Update app metadata (incl. Win32 detection `rules`) | `appId`, `displayName`, `description`, `isFeatured`, `rules[]`, … |
 | `delete_intune_app` | Delete an app | `appId` |
 | `upload_win32_lob_app` | Upload a `.intunewin` Win32 LOB package. Source is **exactly one** of: (a) `filePath`, (b) `fileUrl`, or (c) a OneDrive reference (`oneDriveItemPath` **or** `oneDriveItemId`, optionally with `oneDriveUserId` — defaults to `"me"`). | `filePath` \| `fileUrl` \| (`oneDriveItemPath` \| `oneDriveItemId` [+ `oneDriveUserId`]), `displayName`, `publisher`, `description`, `installCommandLine`, `uninstallCommandLine`, `setupFilePath`, `applicableArchitectures`, `minimumSupportedWindowsRelease`, `runAsAccount`, `deviceRestartBehavior` |
+| `update_windows_msix_app_content` | Replace the package content of an existing `#microsoft.graph.windowsUniversalAppX` (MSIX) app. Creates a new `contentVersion`, uploads the `.msix` **unencrypted** to the Intune-allocated Azure Blob, commits it, and patches `committedContentVersion`. Verifies the target app's `@odata.type` first — Win32, web and store apps are rejected. | `appId`, `filePath` \| `fileUrl` \| (`oneDriveItemPath` \| `oneDriveItemId` [+ `oneDriveUserId`]), `fileName` *(optional)* |
 | `list_intune_app_relationships` | List supersedence / dependency links | `appId` |
 | `set_intune_app_relationships` | Set supersedence / dependency links (replaces all) | `appId`, `relationships[]` |
 | `list_intune_app_assignments` | List assignments | `appId` |
@@ -596,6 +599,20 @@ upload_win32_lob_app
   installCommandLine="setup.exe /S"
   uninstallCommandLine="setup.exe /U"
   setupFilePath="setup.exe"
+```
+
+**MSIX content update notes:**
+
+- `update_windows_msix_app_content` requires the target app to be a `#microsoft.graph.windowsUniversalAppX`; other types are rejected up-front so you don't create an orphaned contentVersion.
+- MSIX payloads are uploaded **unencrypted** — the commit body is `{}`, no `fileEncryptionInfo` is sent.
+- OneDrive and `fileUrl` sources reuse the same 2 GB cap and SSRF guard as the Win32 flow.
+- Assignments on the app are preserved — only the committed content version changes.
+
+**Example — update an existing MSIX app from OneDrive:**
+```
+update_windows_msix_app_content
+  appId="00000000-0000-0000-0000-000000000000"
+  oneDriveItemPath="/intune/myapp/myapp.msix"
 ```
 
 **Example — assign app as required:**
@@ -815,7 +832,7 @@ msgraphmcp/
 │       ├── contacts.ts           5 tools
 │       ├── tasks.ts              8 tools
 │       ├── sites.ts              10 tools
-│       └── intune.ts             63 tools (apps · win32 LOB · config · settings catalog · compliance · devices · diagnostics · notification templates)
+│       └── intune.ts             64 tools (apps · win32 LOB · MSIX · config · settings catalog · compliance · devices · diagnostics · notification templates)
 ├── tests/
 │   ├── helpers/
 │   │   ├── MockMcpServer.ts      Captures tool registrations for unit testing

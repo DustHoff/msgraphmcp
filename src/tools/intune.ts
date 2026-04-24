@@ -223,13 +223,14 @@ async function uploadBlobBlocks(sasUri: string, data: Buffer): Promise<void> {
 async function pollContentFile(
   graph: GraphClient,
   appId: string,
+  appTypeSegment: string,
   versionId: string,
   fileId: string,
   until: (state: string) => boolean,
   timeoutMs = 180_000,
 ): Promise<Record<string, unknown>> {
   const FAIL_STATES = ['Failed', 'TimedOut', 'Error'];
-  const url = `/deviceAppManagement/mobileApps/${appId}/microsoft.graph.win32LobApp/contentVersions/${versionId}/files/${fileId}`;
+  const url = `/deviceAppManagement/mobileApps/${appId}/${appTypeSegment}/contentVersions/${versionId}/files/${fileId}`;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 3000));
@@ -239,6 +240,64 @@ async function pollContentFile(
     if (FAIL_STATES.some(s => state.includes(s))) throw new Error(`Upload failed: uploadState=${state}`);
   }
   throw new Error('Timed out waiting for file upload state');
+}
+
+/**
+ * Create a new contentVersion under a mobileApp subtype (Win32 LOB or MSIX),
+ * upload the binary to the Azure Blob SAS it allocates, and commit it.
+ * Returns the new contentVersion id. The caller is responsible for the
+ * subsequent PATCH of `committedContentVersion` on the app (the required
+ * `@odata.type` differs per subtype).
+ *
+ * Pass `fileEncryptionInfo` for encrypted payloads (Win32 .intunewin).
+ * Omit it for unencrypted payloads (MSIX) — commit body becomes `{}`.
+ */
+async function uploadAppContentVersion(
+  graph: GraphClient,
+  appId: string,
+  appTypeSegment: string,
+  content: Buffer,
+  fileName: string,
+  unencryptedSize: number,
+  fileEncryptionInfo?: Record<string, unknown>,
+): Promise<string> {
+  const base = `/deviceAppManagement/mobileApps/${appId}/${appTypeSegment}`;
+
+  const version = await graph.post<{ id: string }>(`${base}/contentVersions`, {});
+
+  const fileEntry = await graph.post<{ id: string }>(
+    `${base}/contentVersions/${version.id}/files`,
+    {
+      '@odata.type': '#microsoft.graph.mobileAppContentFile',
+      name: fileName,
+      size: unencryptedSize,
+      sizeEncrypted: content.length,
+      manifest: null,
+      isDependency: false,
+    },
+  );
+
+  const fileReady = await pollContentFile(
+    graph, appId, appTypeSegment, version.id, fileEntry.id,
+    s => s === 'azureStorageUriRequestSuccess',
+  );
+  const sasUri = fileReady.azureStorageUri as string;
+  if (!sasUri) throw new Error('Azure Storage URI not provided by Graph API');
+
+  await uploadBlobBlocks(sasUri, content);
+
+  await graph.post(
+    `${base}/contentVersions/${version.id}/files/${fileEntry.id}/commit`,
+    fileEncryptionInfo ? { fileEncryptionInfo } : {},
+  );
+
+  await pollContentFile(
+    graph, appId, appTypeSegment, version.id, fileEntry.id,
+    s => s === 'commitFileSuccess',
+    300_000, // 5 min — large packages take time
+  );
+
+  return version.id;
 }
 
 // ─── shared helpers ──────────────────────────────────────────────────────────
@@ -544,63 +603,28 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
       });
 
       try {
-        // ③ Create content version
-        const version = await graph.post<{ id: string }>(
-          `/deviceAppManagement/mobileApps/${app.id}/microsoft.graph.win32LobApp/contentVersions`,
-          {},
-        );
-
-        // ④ Create file entry — triggers Azure Storage URI allocation
-        const fileEntry = await graph.post<{ id: string }>(
-          `/deviceAppManagement/mobileApps/${app.id}/microsoft.graph.win32LobApp/contentVersions/${version.id}/files`,
+        // ③–⑧ Upload the encrypted content, then link the new version
+        const versionId = await uploadAppContentVersion(
+          graph,
+          app.id,
+          'microsoft.graph.win32LobApp',
+          info.encryptedContent,
+          info.fileName,
+          info.unencryptedSize,
           {
-            '@odata.type': '#microsoft.graph.mobileAppContentFile',
-            name: info.fileName,
-            size: info.unencryptedSize,
-            sizeEncrypted: info.encryptedContent.length,
-            manifest: null,
-            isDependency: false,
+            encryptionKey: info.encryptionKey,
+            initializationVector: info.initializationVector,
+            mac: info.mac,
+            macKey: info.macKey,
+            profileIdentifier: 'ProfileVersion1',
+            fileDigest: info.fileDigest,
+            fileDigestAlgorithm: info.fileDigestAlgorithm,
           },
         );
 
-        // ⑤ Poll until azureStorageUri is ready
-        const fileReady = await pollContentFile(
-          graph, app.id, version.id, fileEntry.id,
-          s => s === 'azureStorageUriRequestSuccess',
-        );
-        const sasUri = fileReady.azureStorageUri as string;
-        if (!sasUri) throw new Error('Azure Storage URI not provided by Graph API');
-
-        // ⑥ Upload encrypted content to Azure Blob in 4 MB blocks
-        await uploadBlobBlocks(sasUri, info.encryptedContent);
-
-        // ⑦ Commit file with encryption metadata
-        await graph.post(
-          `/deviceAppManagement/mobileApps/${app.id}/microsoft.graph.win32LobApp/contentVersions/${version.id}/files/${fileEntry.id}/commit`,
-          {
-            fileEncryptionInfo: {
-              encryptionKey: info.encryptionKey,
-              initializationVector: info.initializationVector,
-              mac: info.mac,
-              macKey: info.macKey,
-              profileIdentifier: 'ProfileVersion1',
-              fileDigest: info.fileDigest,
-              fileDigestAlgorithm: info.fileDigestAlgorithm,
-            },
-          },
-        );
-
-        // ⑧ Poll until commit is confirmed
-        await pollContentFile(
-          graph, app.id, version.id, fileEntry.id,
-          s => s === 'commitFileSuccess',
-          300_000, // 5 min — large files take time
-        );
-
-        // ⑨ Link committed content version to the app
         await graph.patch(`/deviceAppManagement/mobileApps/${app.id}`, {
           '@odata.type': '#microsoft.graph.win32LobApp',
-          committedContentVersion: version.id,
+          committedContentVersion: versionId,
         });
 
         return {
@@ -608,7 +632,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
             type: 'text' as const,
             text: JSON.stringify({
               appId: app.id,
-              contentVersionId: version.id,
+              contentVersionId: versionId,
               fileName: info.fileName,
               message: `"${displayName}" uploaded. Next: set detection rules via update_intune_app, then assign groups via assign_intune_app.`,
             }, null, 2),
@@ -618,6 +642,114 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
         // Remove the shell app entry so there is no orphaned app without content
         await graph.delete(`/deviceAppManagement/mobileApps/${app.id}`).catch(() => {});
         throw err;
+      } finally {
+        if (tmpPath) fs.unlink(tmpPath, () => {});
+      }
+    }
+  );
+
+  server.tool(
+    'update_windows_msix_app_content',
+    'Replace the package content of an existing Intune MSIX / windowsUniversalAppX app ' +
+    'with a new .msix. Creates a new contentVersion on the existing app, streams the ' +
+    '.msix to the Intune-allocated Azure Blob (unencrypted — MSIX is self-signed), ' +
+    'commits it, and patches committedContentVersion. ' +
+    'Provide exactly one source: filePath (absolute path on the server), fileUrl ' +
+    '(HTTP/HTTPS URL the server downloads), or a OneDrive reference ' +
+    '(oneDriveItemPath or oneDriveItemId, optionally with oneDriveUserId — defaults to "me").',
+    {
+      appId: z.string().describe('Object id of the existing #microsoft.graph.windowsUniversalAppX in Intune.'),
+      filePath: z.string().optional()
+        .describe('Absolute path to the .msix file on the server, e.g. /data/claude.msix'),
+      fileUrl: z.string().url().optional()
+        .describe('HTTP/HTTPS URL of the .msix — the server will download it before uploading'),
+      oneDriveUserId: z.string().optional()
+        .describe('OneDrive owner — user id or "me" (default). Used with oneDriveItemPath/oneDriveItemId.'),
+      oneDriveItemPath: z.string().optional()
+        .describe('Path of the .msix file in OneDrive, e.g. "/intune/claude/Claude.msix"'),
+      oneDriveItemId: z.string().optional()
+        .describe('OneDrive DriveItem id of the .msix (alternative to oneDriveItemPath)'),
+      fileName: z.string().optional()
+        .describe('Overrides the file name stored on the new contentFile. Defaults to the source basename.'),
+    },
+    async ({ appId, filePath, fileUrl, oneDriveUserId, oneDriveItemPath, oneDriveItemId, fileName }) => {
+      const hasOneDrive = Boolean(oneDriveItemPath || oneDriveItemId);
+      const sourceCount = [Boolean(filePath), Boolean(fileUrl), hasOneDrive].filter(Boolean).length;
+      if (sourceCount === 0) {
+        throw new Error('Provide one of filePath, fileUrl, or oneDriveItemPath/oneDriveItemId.');
+      }
+      if (sourceCount > 1) {
+        throw new Error('Provide only one source: filePath, fileUrl, or a OneDrive reference.');
+      }
+      if (oneDriveItemPath && oneDriveItemId) {
+        throw new Error('Provide either oneDriveItemPath or oneDriveItemId, not both.');
+      }
+
+      // Verify target app is actually a windowsUniversalAppX — this tool is not a fit
+      // for Win32 LOB, webApp, or store apps (different content flow or no content at all).
+      // Fetch the full app: the `@odata.type` discriminator is only returned without $select.
+      const existing = await graph.get<Record<string, unknown>>(
+        `/deviceAppManagement/mobileApps/${encodeId(appId)}`,
+      );
+      const actualType = existing['@odata.type'] as string | undefined;
+      if (actualType !== '#microsoft.graph.windowsUniversalAppX') {
+        throw new Error(
+          `App ${appId} is ${actualType ?? 'of unknown type'}, not #microsoft.graph.windowsUniversalAppX. ` +
+          `update_windows_msix_app_content only updates MSIX apps.`,
+        );
+      }
+      const appDisplayName = existing.displayName as string | undefined;
+
+      let tmpPath: string | undefined;
+      let sourcePath: string;
+      if (fileUrl) {
+        tmpPath = await downloadToTempFile(fileUrl);
+        sourcePath = tmpPath;
+      } else if (hasOneDrive) {
+        tmpPath = await downloadOneDriveItemToTempFile(
+          graph,
+          oneDriveUserId ?? 'me',
+          oneDriveItemPath,
+          oneDriveItemId,
+        );
+        sourcePath = tmpPath;
+      } else {
+        sourcePath = filePath!;
+      }
+
+      try {
+        if (!fs.existsSync(sourcePath)) throw new Error(`File not found: ${sourcePath}`);
+        const content = fs.readFileSync(sourcePath);
+        const effectiveName = fileName ?? path.basename(sourcePath);
+
+        const versionId = await uploadAppContentVersion(
+          graph,
+          appId,
+          'microsoft.graph.windowsUniversalAppX',
+          content,
+          effectiveName,
+          content.length,
+          // No fileEncryptionInfo — MSIX uploads unencrypted, commit body is `{}`.
+        );
+
+        await graph.patch(`/deviceAppManagement/mobileApps/${encodeId(appId)}`, {
+          '@odata.type': '#microsoft.graph.windowsUniversalAppX',
+          committedContentVersion: versionId,
+        });
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              appId,
+              displayName: appDisplayName,
+              committedContentVersion: versionId,
+              fileName: effectiveName,
+              sizeBytes: content.length,
+              message: `MSIX app content updated to contentVersion ${versionId}.`,
+            }, null, 2),
+          }],
+        };
       } finally {
         if (tmpPath) fs.unlink(tmpPath, () => {});
       }
