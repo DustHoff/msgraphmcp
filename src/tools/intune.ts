@@ -7,7 +7,7 @@ import * as net from 'node:net';
 import AdmZip from 'adm-zip';
 import axios from 'axios';
 import { GraphClient } from '../graph/GraphClient';
-import { encodeId, odataQuote } from './shared';
+import { encodeId, odataQuote, userPath, encodeDrivePath } from './shared';
 
 // Upper bound for server-side downloads of .intunewin packages. Guards against
 // an attacker (or misconfigured URL) draining the /tmp filesystem.
@@ -150,6 +150,50 @@ async function downloadToTempFile(url: string): Promise<string> {
     fs.unlink(tmpPath, () => {});
     throw err;
   }
+}
+
+interface DriveItemMeta {
+  id?: string;
+  name?: string;
+  size?: number;
+  file?: unknown;
+  folder?: unknown;
+  '@microsoft.graph.downloadUrl'?: string;
+}
+
+/**
+ * Resolve a OneDrive file reference to a local temp file path by fetching its
+ * DriveItem metadata for a short-lived pre-authenticated download URL, then
+ * streaming the content through the same bounded writer used for plain URL
+ * downloads (SSRF guard + MAX_DOWNLOAD_BYTES cap).
+ */
+async function downloadOneDriveItemToTempFile(
+  graph: GraphClient,
+  userId: string,
+  itemPath: string | undefined,
+  itemId: string | undefined,
+): Promise<string> {
+  const driveBase = `${userPath(userId)}/drive`;
+  const itemUrl = itemId
+    ? `${driveBase}/items/${encodeURIComponent(itemId)}`
+    : `${driveBase}/root:${encodeDrivePath(itemPath!)}`;
+
+  const meta = await graph.get<DriveItemMeta>(itemUrl, {
+    $select: 'id,name,size,file,folder,@microsoft.graph.downloadUrl',
+  });
+
+  if (meta.folder) {
+    throw new Error(
+      `OneDrive item is a folder, not a file: ${itemPath ?? itemId}`,
+    );
+  }
+  const downloadUrl = meta['@microsoft.graph.downloadUrl'];
+  if (!downloadUrl) {
+    throw new Error(
+      `OneDrive item has no downloadUrl — not a downloadable file: ${itemPath ?? itemId}`,
+    );
+  }
+  return downloadToTempFile(downloadUrl);
 }
 
 const BLOB_BLOCK_SIZE = 4 * 1024 * 1024; // 4 MB per block
@@ -406,14 +450,21 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
   server.tool(
     'upload_win32_lob_app',
     'Upload a Win32 LOB app (.intunewin file) to Intune. ' +
-    'Provide either filePath (absolute path on the server, e.g. /data/myapp.intunewin) ' +
-    'or fileUrl (HTTP/HTTPS URL from which the server will download the file). ' +
+    'Provide exactly one source: filePath (absolute path on the server, e.g. /data/myapp.intunewin), ' +
+    'fileUrl (HTTP/HTTPS URL from which the server will download the file), ' +
+    'or a OneDrive reference via oneDriveItemPath or oneDriveItemId (the server fetches the file from OneDrive via Graph). ' +
     'After upload, set detection rules via update_intune_app and assign groups via assign_intune_app.',
     {
       filePath: z.string().optional()
         .describe('Absolute path to the .intunewin file on the server, e.g. /data/myapp.intunewin'),
       fileUrl: z.string().url().optional()
         .describe('HTTP/HTTPS URL of the .intunewin file — the server will download it before uploading to Intune'),
+      oneDriveUserId: z.string().optional()
+        .describe('OneDrive owner — user id or "me" (default). Used together with oneDriveItemPath or oneDriveItemId.'),
+      oneDriveItemPath: z.string().optional()
+        .describe('Path of the .intunewin file in the OneDrive of oneDriveUserId, e.g. "/Apps/myapp.intunewin"'),
+      oneDriveItemId: z.string().optional()
+        .describe('OneDrive DriveItem id of the .intunewin file (alternative to oneDriveItemPath)'),
       displayName: z.string(),
       publisher: z.string(),
       description: z.string().optional(),
@@ -431,18 +482,36 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
       deviceRestartBehavior: z.enum(['allow', 'basedOnReturnCode', 'suppress', 'force']).default('allow'),
     },
     async ({
-      filePath, fileUrl, displayName, publisher, description,
+      filePath, fileUrl, oneDriveUserId, oneDriveItemPath, oneDriveItemId,
+      displayName, publisher, description,
       installCommandLine, uninstallCommandLine, setupFilePath,
       applicableArchitectures, minimumSupportedWindowsRelease,
       runAsAccount, deviceRestartBehavior,
     }) => {
-      if (!filePath && !fileUrl) throw new Error('Provide either filePath or fileUrl.');
-      if (filePath && fileUrl) throw new Error('Provide only one of filePath or fileUrl, not both.');
+      const hasOneDrive = Boolean(oneDriveItemPath || oneDriveItemId);
+      const sourceCount = [Boolean(filePath), Boolean(fileUrl), hasOneDrive].filter(Boolean).length;
+      if (sourceCount === 0) {
+        throw new Error('Provide one of filePath, fileUrl, or oneDriveItemPath/oneDriveItemId.');
+      }
+      if (sourceCount > 1) {
+        throw new Error('Provide only one source: filePath, fileUrl, or a OneDrive reference.');
+      }
+      if (oneDriveItemPath && oneDriveItemId) {
+        throw new Error('Provide either oneDriveItemPath or oneDriveItemId, not both.');
+      }
 
-      // ① Download from URL if needed, then parse .intunewin
+      // ① Download from URL or OneDrive if needed, then parse .intunewin
       let tmpPath: string | undefined;
       if (fileUrl) {
         tmpPath = await downloadToTempFile(fileUrl);
+        filePath = tmpPath;
+      } else if (hasOneDrive) {
+        tmpPath = await downloadOneDriveItemToTempFile(
+          graph,
+          oneDriveUserId ?? 'me',
+          oneDriveItemPath,
+          oneDriveItemId,
+        );
         filePath = tmpPath;
       }
       const info = parseIntuneWin(filePath!);

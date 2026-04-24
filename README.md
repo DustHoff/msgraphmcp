@@ -569,7 +569,7 @@ create_event subject="Sprint Review" startDateTime="2024-06-14T14:00:00" endDate
 | `create_intune_store_app` | Add a store app | `displayName`, `publisher`, `storeType` (`windowsStore`\|`iosStore`\|`androidStore`), `appStoreUrl` |
 | `update_intune_app` | Update app metadata (incl. Win32 detection `rules`) | `appId`, `displayName`, `description`, `isFeatured`, `rules[]`, … |
 | `delete_intune_app` | Delete an app | `appId` |
-| `upload_win32_lob_app` | Upload a `.intunewin` Win32 LOB package | `filePath` **or** `fileUrl`, `displayName`, `publisher`, `installCommandLine`, `uninstallCommandLine`, `setupFilePath`, `applicableArchitectures`, `minimumSupportedWindowsRelease`, `runAsAccount`, `deviceRestartBehavior` |
+| `upload_win32_lob_app` | Upload a `.intunewin` Win32 LOB package. Source is **exactly one** of: (a) `filePath`, (b) `fileUrl`, or (c) a OneDrive reference (`oneDriveItemPath` **or** `oneDriveItemId`, optionally with `oneDriveUserId` — defaults to `"me"`). | `filePath` \| `fileUrl` \| (`oneDriveItemPath` \| `oneDriveItemId` [+ `oneDriveUserId`]), `displayName`, `publisher`, `description`, `installCommandLine`, `uninstallCommandLine`, `setupFilePath`, `applicableArchitectures`, `minimumSupportedWindowsRelease`, `runAsAccount`, `deviceRestartBehavior` |
 | `list_intune_app_relationships` | List supersedence / dependency links | `appId` |
 | `set_intune_app_relationships` | Set supersedence / dependency links (replaces all) | `appId`, `relationships[]` |
 | `list_intune_app_assignments` | List assignments | `appId` |
@@ -581,9 +581,22 @@ create_event subject="Sprint Review" startDateTime="2024-06-14T14:00:00" endDate
 
 **Win32 LOB upload notes:**
 
+- Provide **exactly one** source: `filePath` (server-side absolute path), `fileUrl` (HTTP/HTTPS URL) or a OneDrive reference (`oneDriveItemPath` or `oneDriveItemId`, optionally with `oneDriveUserId` — defaults to `"me"`).
 - `fileUrl` is fetched server-side with an SSRF guard (http/https only; loopback, link-local, RFC1918 ranges, and cloud-metadata hostnames are blocked).
-- Downloads are capped at 2 GB.
+- OneDrive sources resolve the DriveItem via Graph (`$select=id,name,size,file,folder,@microsoft.graph.downloadUrl`), reject folders, and stream the short-lived pre-authenticated download URL through the same bounded writer.
+- Downloads are capped at 2 GB (applies to `fileUrl` and OneDrive sources alike).
 - After upload, set detection/requirement rules via `update_intune_app` (field `rules[]`) and assign to groups via `assign_intune_app`.
+
+**Example — upload from OneDrive:**
+```
+upload_win32_lob_app
+  oneDriveItemPath="/Apps/myapp.intunewin"
+  displayName="My App"
+  publisher="Contoso"
+  installCommandLine="setup.exe /S"
+  uninstallCommandLine="setup.exe /U"
+  setupFilePath="setup.exe"
+```
 
 **Example — assign app as required:**
 ```
@@ -862,7 +875,7 @@ docker pull ghcr.io/DustHoff/msgraphmcp:latest
 - **One-time login tokens:** the `loginUrl` carries a single-use 256-bit token (not the MCP session ID). It is consumed on first visit, expires after 15 minutes, and binds server-side to exactly one session — so even if a login URL is disclosed via browser history, a proxy log, or an email it cannot be replayed.
 - **HTML escaping on the auth pages:** the `/auth/callback` error page escapes all five HTML-significant characters (`&`, `<`, `>`, `"`, `'`) — an attacker cannot reflect a crafted `error_description` (including HTML numeric entities like `&#60;script&#62;`) into executable markup.
 - **URL-path safety:** all user-supplied opaque ids passed to Graph (`groupId`, `teamId`, `channelId`, `appId`, `configId`, `policyId`, `templateId`, `deviceId`, `siteId`, `listId`, `itemId`, `memberId`, `ownerId`, `userId`) are percent-encoded before they are embedded in Graph URLs, so a tool argument cannot smuggle extra path segments, query strings, or fragments into a request. SharePoint composite site ids (`hostname,guid,guid`) keep their commas intact.
-- **SSRF guard on Win32 LOB upload:** `upload_win32_lob_app` with a `fileUrl` argument rejects non-http(s) schemes and blocks loopback, link-local, RFC1918, cloud-metadata and multicast ranges before issuing the download. The download size is capped at 2 GB.
+- **SSRF guard on Win32 LOB upload:** `upload_win32_lob_app` with a `fileUrl` argument rejects non-http(s) schemes and blocks loopback, link-local, RFC1918, cloud-metadata and multicast ranges before issuing the download. OneDrive sources reuse the same guard against the short-lived pre-authenticated download URL returned by Graph. The download size is capped at 2 GB in all cases.
 - **Request-body limit:** the HTTP server caps incoming request bodies at 4 MB and destroys the socket immediately on overflow to prevent OOM via a large JSON-RPC payload.
 - **Session limits:** `MAX_SESSIONS` (default 50) caps concurrent sessions; `SESSION_IDLE_TIMEOUT_MINUTES` (default 60) reaps idle sessions so abandoned connections do not leak memory.
 - **Sensitive-value redaction in debug logs:** values of keys matching `/password|secret|token|credential|private[-_]?key|apikey/i` are replaced with `***REDACTED***` before any request/response body is logged.

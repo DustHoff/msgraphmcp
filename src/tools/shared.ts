@@ -54,6 +54,17 @@ export function encodeId(id: string): string {
 }
 
 /**
+ * Encode a OneDrive/SharePoint path for inclusion between `root:` and `:`
+ * markers. The path is encoded segment-by-segment so that `/` separators
+ * stay intact while spaces, `#`, `?`, `%`, etc. are percent-encoded.
+ * Ensures the path is absolute (leading `/`).
+ */
+export function encodeDrivePath(path: string): string {
+  const normalized = path.startsWith('/') ? path : `/${path}`;
+  return normalized.split('/').map(encodeURIComponent).join('/');
+}
+
+/**
  * Escapes a value for inclusion inside an HTML text node. Encodes the
  * five HTML-significant characters: & < > " '. Use this when reflecting
  * untrusted data (e.g. OAuth `error_description` query params) into a

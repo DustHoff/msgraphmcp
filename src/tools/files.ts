@@ -1,18 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { GraphClient } from '../graph/GraphClient';
-import { userPath, odataQuote } from './shared';
-
-/**
- * Encode a OneDrive/SharePoint path for inclusion between `root:` and `:`
- * markers. The path is encoded segment-by-segment so that `/` separators
- * stay intact while spaces, `#`, `?`, `%`, etc. are percent-encoded.
- * Ensures the path is absolute (leading `/`).
- */
-function encodeDrivePath(path: string): string {
-  const normalized = path.startsWith('/') ? path : `/${path}`;
-  return normalized.split('/').map(encodeURIComponent).join('/');
-}
+import { userPath, odataQuote, encodeDrivePath } from './shared';
 
 export function registerFileTools(server: McpServer, graph: GraphClient) {
   server.tool(
