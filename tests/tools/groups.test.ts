@@ -74,4 +74,27 @@ describe('Group Tools', () => {
       expect(body.displayName).toBeUndefined();
     });
   });
+
+  describe('URL-encoding of opaque ids', () => {
+    it('encodes groupId before embedding it in the path', async () => {
+      graph.get.mockResolvedValue({ id: 'g/1' });
+      await server.call('get_group', { groupId: 'g/1' });
+      const [url] = args(graph.get);
+      expect(url).toBe('/groups/g%2F1');
+    });
+
+    it('encodes both groupId and memberId in add_group_member', async () => {
+      graph.post.mockResolvedValue(undefined);
+      await server.call('add_group_member', { groupId: 'g/1', memberId: 'u?2' });
+      const [url, body] = args(graph.post);
+      expect(url).toBe('/groups/g%2F1/members/$ref');
+      expect(body['@odata.id']).toBe('https://graph.microsoft.com/v1.0/directoryObjects/u%3F2');
+    });
+
+    it('encodes both groupId and memberId in remove_group_member', async () => {
+      graph.delete.mockResolvedValue(undefined);
+      await server.call('remove_group_member', { groupId: 'g/1', memberId: 'u?2' });
+      expect(graph.delete).toHaveBeenCalledWith('/groups/g%2F1/members/u%3F2/$ref');
+    });
+  });
 });

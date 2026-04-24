@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { GraphClient } from '../graph/GraphClient';
-import { needsEventualConsistency } from './shared';
+import { encodeId, needsEventualConsistency } from './shared';
 
 export function registerGroupTools(server: McpServer, graph: GraphClient) {
   server.tool(
@@ -37,7 +37,7 @@ export function registerGroupTools(server: McpServer, graph: GraphClient) {
       select: z.string().optional(),
     },
     async ({ groupId, select }) => {
-      const group = await graph.get(`/groups/${groupId}`, select ? { $select: select } : undefined);
+      const group = await graph.get(`/groups/${encodeId(groupId)}`, select ? { $select: select } : undefined);
       return { content: [{ type: 'text', text: JSON.stringify(group, null, 2) }] };
     }
   );
@@ -83,7 +83,7 @@ export function registerGroupTools(server: McpServer, graph: GraphClient) {
     },
     async ({ groupId, ...props }) => {
       const body = Object.fromEntries(Object.entries(props).filter(([, v]) => v !== undefined));
-      await graph.patch(`/groups/${groupId}`, body);
+      await graph.patch(`/groups/${encodeId(groupId)}`, body);
       return { content: [{ type: 'text', text: `Group ${groupId} updated.` }] };
     }
   );
@@ -93,7 +93,7 @@ export function registerGroupTools(server: McpServer, graph: GraphClient) {
     'Delete a group.',
     { groupId: z.string() },
     async ({ groupId }) => {
-      await graph.delete(`/groups/${groupId}`);
+      await graph.delete(`/groups/${encodeId(groupId)}`);
       return { content: [{ type: 'text', text: `Group ${groupId} deleted.` }] };
     }
   );
@@ -107,7 +107,7 @@ export function registerGroupTools(server: McpServer, graph: GraphClient) {
     },
     async ({ groupId, select }) => {
       const members = await graph.getAll(
-        `/groups/${groupId}/members`,
+        `/groups/${encodeId(groupId)}/members`,
         select ? { $select: select } : undefined
       );
       return { content: [{ type: 'text', text: JSON.stringify(members, null, 2) }] };
@@ -122,8 +122,8 @@ export function registerGroupTools(server: McpServer, graph: GraphClient) {
       memberId: z.string().describe('Object id of the user/service principal to add'),
     },
     async ({ groupId, memberId }) => {
-      await graph.post(`/groups/${groupId}/members/$ref`, {
-        '@odata.id': `https://graph.microsoft.com/v1.0/directoryObjects/${memberId}`,
+      await graph.post(`/groups/${encodeId(groupId)}/members/$ref`, {
+        '@odata.id': `https://graph.microsoft.com/v1.0/directoryObjects/${encodeId(memberId)}`,
       });
       return { content: [{ type: 'text', text: `Member ${memberId} added to group ${groupId}.` }] };
     }
@@ -137,7 +137,7 @@ export function registerGroupTools(server: McpServer, graph: GraphClient) {
       memberId: z.string(),
     },
     async ({ groupId, memberId }) => {
-      await graph.delete(`/groups/${groupId}/members/${memberId}/$ref`);
+      await graph.delete(`/groups/${encodeId(groupId)}/members/${encodeId(memberId)}/$ref`);
       return { content: [{ type: 'text', text: `Member ${memberId} removed from group ${groupId}.` }] };
     }
   );
@@ -147,7 +147,7 @@ export function registerGroupTools(server: McpServer, graph: GraphClient) {
     'List owners of a group.',
     { groupId: z.string() },
     async ({ groupId }) => {
-      const owners = await graph.getAll(`/groups/${groupId}/owners`);
+      const owners = await graph.getAll(`/groups/${encodeId(groupId)}/owners`);
       return { content: [{ type: 'text', text: JSON.stringify(owners, null, 2) }] };
     }
   );
@@ -160,8 +160,8 @@ export function registerGroupTools(server: McpServer, graph: GraphClient) {
       ownerId: z.string().describe('Object id of the user to add as owner'),
     },
     async ({ groupId, ownerId }) => {
-      await graph.post(`/groups/${groupId}/owners/$ref`, {
-        '@odata.id': `https://graph.microsoft.com/v1.0/users/${ownerId}`,
+      await graph.post(`/groups/${encodeId(groupId)}/owners/$ref`, {
+        '@odata.id': `https://graph.microsoft.com/v1.0/users/${encodeId(ownerId)}`,
       });
       return { content: [{ type: 'text', text: `Owner ${ownerId} added to group ${groupId}.` }] };
     }

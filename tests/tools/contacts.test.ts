@@ -28,7 +28,8 @@ describe('Contact Tools', () => {
         emailAddresses: [{ address: 'alice@x.com' }],
       });
       const [url, body] = args(graph.post);
-      expect(url).toBe('/users/me/contacts');
+      // userPath('me') uses /me, not /users/me — the latter returns 404.
+      expect(url).toBe('/me/contacts');
       expect(body.givenName).toBe('Alice');
       expect(body.emailAddresses[0].address).toBe('alice@x.com');
     });
@@ -56,7 +57,7 @@ describe('Contact Tools', () => {
     it('calls DELETE with contact path', async () => {
       graph.delete.mockResolvedValue(undefined);
       await server.call('delete_contact', { contactId: 'c1' });
-      expect(graph.delete).toHaveBeenCalledWith('/users/me/contacts/c1');
+      expect(graph.delete).toHaveBeenCalledWith('/me/contacts/c1');
     });
   });
 });

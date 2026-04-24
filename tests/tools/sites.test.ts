@@ -77,4 +77,31 @@ describe('SharePoint Site Tools', () => {
       expect(graph.delete).toHaveBeenCalledWith('/sites/s1/lists/l1/items/i1');
     });
   });
+
+  describe('URL-encoding of opaque ids', () => {
+    it('preserves the commas in composite siteIds (hostname,guid,guid)', async () => {
+      graph.get.mockResolvedValue({ id: 'x' });
+      await server.call('get_site', { siteId: 'contoso.sharepoint.com,abc,def' });
+      expect(graph.get).toHaveBeenCalledWith('/sites/contoso.sharepoint.com,abc,def');
+    });
+
+    it('encodes hostname and path when building hostname:path URLs', async () => {
+      graph.get.mockResolvedValue({ id: 'x' });
+      await server.call('get_site', {
+        hostname: 'contoso.sharepoint.com',
+        sitePath: '/sites/HR Team',
+      });
+      expect(graph.get).toHaveBeenCalledWith('/sites/contoso.sharepoint.com:/sites/HR%20Team');
+    });
+
+    it('encodes listId and itemId when building list item URLs', async () => {
+      graph.get.mockResolvedValue({ id: 'x' });
+      await server.call('get_site_list_item', {
+        siteId: 's1', listId: 'l/1', itemId: 'i?1',
+      });
+      const [url, params] = args(graph.get);
+      expect(url).toBe('/sites/s1/lists/l%2F1/items/i%3F1');
+      expect(params).toEqual({ $expand: 'fields' });
+    });
+  });
 });

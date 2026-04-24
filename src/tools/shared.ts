@@ -37,3 +37,34 @@ export function odataQuote(value: string): string {
 export function needsEventualConsistency(params: Record<string, unknown>): boolean {
   return '$search' in params || params['$count'] === true;
 }
+
+/**
+ * Percent-encode an opaque entity id for safe inclusion as a single path
+ * segment in a Graph API URL. Prevents callers from breaking out of the
+ * intended path with characters like `/`, `?`, `#`, or whitespace — any of
+ * which would change the target resource or let a tool argument smuggle
+ * additional URL parts into the Graph request.
+ *
+ * Use this for GUIDs, object ids, directory-entity ids, device ids, etc.
+ * For OneDrive/SharePoint paths that must keep internal `/` separators, use
+ * a dedicated path encoder instead.
+ */
+export function encodeId(id: string): string {
+  return encodeURIComponent(id);
+}
+
+/**
+ * Escapes a value for inclusion inside an HTML text node. Encodes the
+ * five HTML-significant characters: & < > " '. Use this when reflecting
+ * untrusted data (e.g. OAuth `error_description` query params) into a
+ * response body so a crafted value cannot break out of the surrounding
+ * markup or re-introduce a tag via HTML numeric entities.
+ */
+export function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}

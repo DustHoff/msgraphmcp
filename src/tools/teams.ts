@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { GraphClient } from '../graph/GraphClient';
-import { userPath } from './shared';
+import { encodeId, userPath } from './shared';
 
 export function registerTeamsTools(server: McpServer, graph: GraphClient) {
   server.tool(
@@ -19,7 +19,7 @@ export function registerTeamsTools(server: McpServer, graph: GraphClient) {
     'Get details of a specific team.',
     { teamId: z.string() },
     async ({ teamId }) => {
-      const team = await graph.get(`/teams/${teamId}`);
+      const team = await graph.get(`/teams/${encodeId(teamId)}`);
       return { content: [{ type: 'text', text: JSON.stringify(team, null, 2) }] };
     }
   );
@@ -50,7 +50,7 @@ export function registerTeamsTools(server: McpServer, graph: GraphClient) {
     'List channels in a team.',
     { teamId: z.string() },
     async ({ teamId }) => {
-      const channels = await graph.getAll(`/teams/${teamId}/channels`);
+      const channels = await graph.getAll(`/teams/${encodeId(teamId)}/channels`);
       return { content: [{ type: 'text', text: JSON.stringify(channels, null, 2) }] };
     }
   );
@@ -60,7 +60,7 @@ export function registerTeamsTools(server: McpServer, graph: GraphClient) {
     'Get a specific channel.',
     { teamId: z.string(), channelId: z.string() },
     async ({ teamId, channelId }) => {
-      const channel = await graph.get(`/teams/${teamId}/channels/${channelId}`);
+      const channel = await graph.get(`/teams/${encodeId(teamId)}/channels/${encodeId(channelId)}`);
       return { content: [{ type: 'text', text: JSON.stringify(channel, null, 2) }] };
     }
   );
@@ -77,7 +77,7 @@ export function registerTeamsTools(server: McpServer, graph: GraphClient) {
     async ({ teamId, displayName, description, membershipType }) => {
       const body: Record<string, unknown> = { displayName, membershipType };
       if (description) body.description = description;
-      const channel = await graph.post(`/teams/${teamId}/channels`, body);
+      const channel = await graph.post(`/teams/${encodeId(teamId)}/channels`, body);
       return { content: [{ type: 'text', text: JSON.stringify(channel, null, 2) }] };
     }
   );
@@ -87,7 +87,7 @@ export function registerTeamsTools(server: McpServer, graph: GraphClient) {
     'Delete a channel from a team.',
     { teamId: z.string(), channelId: z.string() },
     async ({ teamId, channelId }) => {
-      await graph.delete(`/teams/${teamId}/channels/${channelId}`);
+      await graph.delete(`/teams/${encodeId(teamId)}/channels/${encodeId(channelId)}`);
       return { content: [{ type: 'text', text: 'Channel deleted.' }] };
     }
   );
@@ -102,7 +102,7 @@ export function registerTeamsTools(server: McpServer, graph: GraphClient) {
     },
     async ({ teamId, channelId, top }) => {
       const messages = await graph.get(
-        `/teams/${teamId}/channels/${channelId}/messages`,
+        `/teams/${encodeId(teamId)}/channels/${encodeId(channelId)}/messages`,
         { $top: top }
       );
       return { content: [{ type: 'text', text: JSON.stringify(messages, null, 2) }] };
@@ -119,7 +119,7 @@ export function registerTeamsTools(server: McpServer, graph: GraphClient) {
       contentType: z.enum(['text', 'html']).default('text'),
     },
     async ({ teamId, channelId, content, contentType }) => {
-      const message = await graph.post(`/teams/${teamId}/channels/${channelId}/messages`, {
+      const message = await graph.post(`/teams/${encodeId(teamId)}/channels/${encodeId(channelId)}/messages`, {
         body: { content, contentType },
       });
       return { content: [{ type: 'text', text: JSON.stringify(message, null, 2) }] };
@@ -138,7 +138,7 @@ export function registerTeamsTools(server: McpServer, graph: GraphClient) {
     },
     async ({ teamId, channelId, messageId, content, contentType }) => {
       const reply = await graph.post(
-        `/teams/${teamId}/channels/${channelId}/messages/${messageId}/replies`,
+        `/teams/${encodeId(teamId)}/channels/${encodeId(channelId)}/messages/${encodeId(messageId)}/replies`,
         { body: { content, contentType } }
       );
       return { content: [{ type: 'text', text: JSON.stringify(reply, null, 2) }] };
@@ -150,7 +150,7 @@ export function registerTeamsTools(server: McpServer, graph: GraphClient) {
     'List members of a team.',
     { teamId: z.string() },
     async ({ teamId }) => {
-      const members = await graph.getAll(`/teams/${teamId}/members`);
+      const members = await graph.getAll(`/teams/${encodeId(teamId)}/members`);
       return { content: [{ type: 'text', text: JSON.stringify(members, null, 2) }] };
     }
   );
@@ -164,10 +164,10 @@ export function registerTeamsTools(server: McpServer, graph: GraphClient) {
       roles: z.array(z.enum(['owner', 'member'])).default(['member']),
     },
     async ({ teamId, userId, roles }) => {
-      const member = await graph.post(`/teams/${teamId}/members`, {
+      const member = await graph.post(`/teams/${encodeId(teamId)}/members`, {
         '@odata.type': '#microsoft.graph.aadUserConversationMember',
         roles,
-        'user@odata.bind': `https://graph.microsoft.com/v1.0/users/${userId}`,
+        'user@odata.bind': `https://graph.microsoft.com/v1.0/users/${encodeId(userId)}`,
       });
       return { content: [{ type: 'text', text: JSON.stringify(member, null, 2) }] };
     }

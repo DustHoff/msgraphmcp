@@ -159,7 +159,9 @@ describe('GraphClient', () => {
     it('sends PATCH and returns data', async () => {
       mockHttp.patch.mockResolvedValue({ data: { id: '1', displayName: 'Updated' } });
       const result = await client.patch('/users/1', { displayName: 'Updated' });
-      expect(mockHttp.patch).toHaveBeenCalledWith('/users/1', { displayName: 'Updated' });
+      // GraphClient.patch forwards an optional config arg; when omitted it
+      // passes undefined so the axios signature matches the 3-arg form.
+      expect(mockHttp.patch).toHaveBeenCalledWith('/users/1', { displayName: 'Updated' }, undefined);
       expect(result).toEqual({ id: '1', displayName: 'Updated' });
     });
   });
@@ -168,7 +170,7 @@ describe('GraphClient', () => {
     it('sends DELETE request', async () => {
       mockHttp.delete.mockResolvedValue({ data: undefined });
       await client.delete('/users/1');
-      expect(mockHttp.delete).toHaveBeenCalledWith('/users/1');
+      expect(mockHttp.delete).toHaveBeenCalledWith('/users/1', undefined);
     });
   });
 

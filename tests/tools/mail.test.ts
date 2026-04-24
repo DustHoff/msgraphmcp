@@ -50,7 +50,8 @@ describe('Mail Tools', () => {
         toRecipients: [{ address: 'bob@contoso.com' }],
       });
       const [url, payload] = args(graph.post);
-      expect(url).toBe('/users/me/sendMail');
+      // userPath('me') uses the dedicated /me endpoint (not /users/me).
+      expect(url).toBe('/me/sendMail');
       expect(payload.message.subject).toBe('Hello');
       expect(payload.message.toRecipients[0].emailAddress.address).toBe('bob@contoso.com');
     });
@@ -81,7 +82,7 @@ describe('Mail Tools', () => {
       graph.post.mockResolvedValue(undefined);
       await server.call('reply_to_message', { messageId: 'msg1', comment: 'Thanks!' });
       expect(graph.post).toHaveBeenCalledWith(
-        '/users/me/messages/msg1/reply',
+        '/me/messages/msg1/reply',
         { comment: 'Thanks!' },
       );
     });
@@ -104,7 +105,7 @@ describe('Mail Tools', () => {
     it('calls DELETE on the message', async () => {
       graph.delete.mockResolvedValue(undefined);
       await server.call('delete_message', { messageId: 'msg1' });
-      expect(graph.delete).toHaveBeenCalledWith('/users/me/messages/msg1');
+      expect(graph.delete).toHaveBeenCalledWith('/me/messages/msg1');
     });
   });
 
@@ -122,7 +123,7 @@ describe('Mail Tools', () => {
       graph.post.mockResolvedValue({ id: 'f1', displayName: 'Projects' });
       await server.call('create_mail_folder', { displayName: 'Projects' });
       const [url] = args(graph.post);
-      expect(url).toBe('/users/me/mailFolders');
+      expect(url).toBe('/me/mailFolders');
     });
 
     it('creates child folder when parentFolderId given', async () => {

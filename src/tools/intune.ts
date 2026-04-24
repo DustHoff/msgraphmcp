@@ -7,7 +7,7 @@ import * as net from 'node:net';
 import AdmZip from 'adm-zip';
 import axios from 'axios';
 import { GraphClient } from '../graph/GraphClient';
-import { odataQuote } from './shared';
+import { encodeId, odataQuote } from './shared';
 
 // Upper bound for server-side downloads of .intunewin packages. Guards against
 // an attacker (or misconfigured URL) draining the /tmp filesystem.
@@ -295,7 +295,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     },
     async ({ appId, select }) => {
       const app = await graph.get(
-        `/deviceAppManagement/mobileApps/${appId}`,
+        `/deviceAppManagement/mobileApps/${encodeId(appId)}`,
         select ? { $select: select } : undefined
       );
       return { content: [{ type: 'text', text: JSON.stringify(app, null, 2) }] };
@@ -388,7 +388,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
       if (Object.keys(body).length === 0) {
         return { content: [{ type: 'text', text: 'No fields provided — nothing to update.' }] };
       }
-      await graph.patch(`/deviceAppManagement/mobileApps/${appId}`, body);
+      await graph.patch(`/deviceAppManagement/mobileApps/${encodeId(appId)}`, body);
       return { content: [{ type: 'text', text: `App ${appId} updated.` }] };
     }
   );
@@ -398,7 +398,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'Delete an Intune managed app.',
     { appId: z.string() },
     async ({ appId }) => {
-      await graph.delete(`/deviceAppManagement/mobileApps/${appId}`);
+      await graph.delete(`/deviceAppManagement/mobileApps/${encodeId(appId)}`);
       return { content: [{ type: 'text', text: `App ${appId} deleted.` }] };
     }
   );
@@ -560,7 +560,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'List supersedence and dependency relationships of an Intune app.',
     { appId: z.string() },
     async ({ appId }) => {
-      const relationships = await graph.getAll(`/deviceAppManagement/mobileApps/${appId}/relationships`);
+      const relationships = await graph.getAll(`/deviceAppManagement/mobileApps/${encodeId(appId)}/relationships`);
       return { content: [{ type: 'text', text: JSON.stringify(relationships, null, 2) }] };
     }
   );
@@ -591,7 +591,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
           ...(r.dependencyType ? { dependencyType: r.dependencyType } : {}),
         })),
       };
-      await graph.post(`/deviceAppManagement/mobileApps/${appId}/updateRelationships`, body);
+      await graph.post(`/deviceAppManagement/mobileApps/${encodeId(appId)}/updateRelationships`, body);
       return { content: [{ type: 'text', text: `App ${appId}: ${relationships.length} relationship(s) set.` }] };
     }
   );
@@ -601,7 +601,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'List group assignments of an Intune app.',
     { appId: z.string() },
     async ({ appId }) => {
-      const assignments = await graph.getAll(`/deviceAppManagement/mobileApps/${appId}/assignments`);
+      const assignments = await graph.getAll(`/deviceAppManagement/mobileApps/${encodeId(appId)}/assignments`);
       return { content: [{ type: 'text', text: JSON.stringify(assignments, null, 2) }] };
     }
   );
@@ -622,7 +622,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
           ...(a.filterId ? { settings: { deviceAndAppManagementAssignmentFilterId: a.filterId, deviceAndAppManagementAssignmentFilterType: a.filterMode ?? 'include' } } : {}),
         })),
       };
-      await graph.post(`/deviceAppManagement/mobileApps/${appId}/assign`, body);
+      await graph.post(`/deviceAppManagement/mobileApps/${encodeId(appId)}/assign`, body);
       return { content: [{ type: 'text', text: `App ${appId} assigned to ${assignments.length} group(s).` }] };
     }
   );
@@ -641,9 +641,12 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
         .describe('Also return per-user aggregate install states'),
     },
     async ({ appId, top, includeUserStatuses }) => {
+      // Fetch without $select — `$select` restricts the response and strips
+      // `@odata.type` from the payload, which later code needs to look up
+      // the per-type `installSummary` endpoint. The mobileApp resource is
+      // small enough that returning all fields is fine here.
       const app = await graph.get<Record<string, unknown>>(
-        `/deviceAppManagement/mobileApps/${appId}`,
-        { $select: 'id,displayName,publishingState' }
+        `/deviceAppManagement/mobileApps/${encodeId(appId)}`,
       );
       const odataType = (app['@odata.type'] as string) ?? '';
 
@@ -675,18 +678,22 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
 
       if (includeUserStatuses) {
         result.userStatuses = await graph.beta.get(
-          `/deviceAppManagement/mobileApps/${appId}/userStatuses`,
+          `/deviceAppManagement/mobileApps/${encodeId(appId)}/userStatuses`,
           { $top: top }
         ).catch(() => null);
       }
 
-      // installSummary — type-cast beta path; not available for all types, skip silently
-      const typeSegment = odataType.replace('#', '');
-      try {
-        result.installSummary = await graph.beta.get(
-          `/deviceAppManagement/mobileApps/${appId}/${typeSegment}/installSummary`
-        );
-      } catch { /* not available for all app types */ }
+      // installSummary — type-cast beta path; not available for all types, skip silently.
+      // The OData type-segment must be unencoded (e.g. `microsoft.graph.win32LobApp`);
+      // only the appId portion is user-controlled and must be encoded.
+      if (odataType) {
+        const typeSegment = odataType.replace('#', '');
+        try {
+          result.installSummary = await graph.beta.get(
+            `/deviceAppManagement/mobileApps/${encodeId(appId)}/${typeSegment}/installSummary`
+          );
+        } catch { /* not available for all app types */ }
+      }
 
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
@@ -716,7 +723,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'Get a specific device configuration profile.',
     { configId: z.string() },
     async ({ configId }) => {
-      const config = await graph.get(`/deviceManagement/deviceConfigurations/${configId}`);
+      const config = await graph.get(`/deviceManagement/deviceConfigurations/${encodeId(configId)}`);
       return { content: [{ type: 'text', text: JSON.stringify(config, null, 2) }] };
     }
   );
@@ -763,7 +770,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
       const body: Record<string, unknown> = { ...settings };
       if (displayName) body.displayName = displayName;
       if (description) body.description = description;
-      const config = await graph.patch(`/deviceManagement/deviceConfigurations/${configId}`, body);
+      const config = await graph.patch(`/deviceManagement/deviceConfigurations/${encodeId(configId)}`, body);
       return { content: [{ type: 'text', text: JSON.stringify(config, null, 2) }] };
     }
   );
@@ -773,7 +780,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'Delete a device configuration profile.',
     { configId: z.string() },
     async ({ configId }) => {
-      await graph.delete(`/deviceManagement/deviceConfigurations/${configId}`);
+      await graph.delete(`/deviceManagement/deviceConfigurations/${encodeId(configId)}`);
       return { content: [{ type: 'text', text: `Configuration ${configId} deleted.` }] };
     }
   );
@@ -796,7 +803,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
             : buildAssignTarget(a.groupId),
         })),
       };
-      await graph.post(`/deviceManagement/deviceConfigurations/${configId}/assign`, body);
+      await graph.post(`/deviceManagement/deviceConfigurations/${encodeId(configId)}/assign`, body);
       return { content: [{ type: 'text', text: `Configuration ${configId} assigned to ${assignments.length} group(s).` }] };
     }
   );
@@ -806,7 +813,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'List group assignments of a device configuration profile.',
     { configId: z.string() },
     async ({ configId }) => {
-      const assignments = await graph.getAll(`/deviceManagement/deviceConfigurations/${configId}/assignments`);
+      const assignments = await graph.getAll(`/deviceManagement/deviceConfigurations/${encodeId(configId)}/assignments`);
       return { content: [{ type: 'text', text: JSON.stringify(assignments, null, 2) }] };
     }
   );
@@ -820,7 +827,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     },
     async ({ configId, top }) => {
       const statuses = await graph.get(
-        `/deviceManagement/deviceConfigurations/${configId}/deviceStatuses`,
+        `/deviceManagement/deviceConfigurations/${encodeId(configId)}/deviceStatuses`,
         { $top: top }
       );
       return { content: [{ type: 'text', text: JSON.stringify(statuses, null, 2) }] };
@@ -850,8 +857,8 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     { policyId: z.string() },
     async ({ policyId }) => {
       const [policy, settings] = await Promise.all([
-        graph.beta.get(`/deviceManagement/configurationPolicies/${policyId}`),
-        graph.beta.getAll(`/deviceManagement/configurationPolicies/${policyId}/settings`),
+        graph.beta.get(`/deviceManagement/configurationPolicies/${encodeId(policyId)}`),
+        graph.beta.getAll(`/deviceManagement/configurationPolicies/${encodeId(policyId)}/settings`),
       ]);
       return { content: [{ type: 'text', text: JSON.stringify({ policy, settings }, null, 2) }] };
     }
@@ -898,7 +905,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
       const body: Record<string, unknown> = {};
       if (name) body.name = name;
       if (description) body.description = description;
-      const policy = await graph.beta.patch(`/deviceManagement/configurationPolicies/${policyId}`, body);
+      const policy = await graph.beta.patch(`/deviceManagement/configurationPolicies/${encodeId(policyId)}`, body);
       return { content: [{ type: 'text', text: JSON.stringify(policy, null, 2) }] };
     }
   );
@@ -908,7 +915,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'Delete a Settings Catalog policy.',
     { policyId: z.string() },
     async ({ policyId }) => {
-      await graph.beta.delete(`/deviceManagement/configurationPolicies/${policyId}`);
+      await graph.beta.delete(`/deviceManagement/configurationPolicies/${encodeId(policyId)}`);
       return { content: [{ type: 'text', text: `Policy ${policyId} deleted.` }] };
     }
   );
@@ -931,7 +938,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
             : buildAssignTarget(a.groupId),
         })),
       };
-      await graph.beta.post(`/deviceManagement/configurationPolicies/${policyId}/assign`, body);
+      await graph.beta.post(`/deviceManagement/configurationPolicies/${encodeId(policyId)}/assign`, body);
       return { content: [{ type: 'text', text: `Policy ${policyId} assigned.` }] };
     }
   );
@@ -981,7 +988,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'Get a specific compliance policy.',
     { policyId: z.string() },
     async ({ policyId }) => {
-      const policy = await graph.get(`/deviceManagement/deviceCompliancePolicies/${policyId}`);
+      const policy = await graph.get(`/deviceManagement/deviceCompliancePolicies/${encodeId(policyId)}`);
       return { content: [{ type: 'text', text: JSON.stringify(policy, null, 2) }] };
     }
   );
@@ -1039,7 +1046,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
       const body: Record<string, unknown> = { ...settings };
       if (displayName) body.displayName = displayName;
       if (description) body.description = description;
-      const policy = await graph.patch(`/deviceManagement/deviceCompliancePolicies/${policyId}`, body);
+      const policy = await graph.patch(`/deviceManagement/deviceCompliancePolicies/${encodeId(policyId)}`, body);
       return { content: [{ type: 'text', text: JSON.stringify(policy, null, 2) }] };
     }
   );
@@ -1049,7 +1056,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'Delete a compliance policy.',
     { policyId: z.string() },
     async ({ policyId }) => {
-      await graph.delete(`/deviceManagement/deviceCompliancePolicies/${policyId}`);
+      await graph.delete(`/deviceManagement/deviceCompliancePolicies/${encodeId(policyId)}`);
       return { content: [{ type: 'text', text: `Compliance policy ${policyId} deleted.` }] };
     }
   );
@@ -1072,7 +1079,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
             : buildAssignTarget(a.groupId),
         })),
       };
-      await graph.post(`/deviceManagement/deviceCompliancePolicies/${policyId}/assign`, body);
+      await graph.post(`/deviceManagement/deviceCompliancePolicies/${encodeId(policyId)}/assign`, body);
       return { content: [{ type: 'text', text: `Compliance policy ${policyId} assigned.` }] };
     }
   );
@@ -1086,7 +1093,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     },
     async ({ policyId, top }) => {
       const statuses = await graph.get(
-        `/deviceManagement/deviceCompliancePolicies/${policyId}/deviceStatuses`,
+        `/deviceManagement/deviceCompliancePolicies/${encodeId(policyId)}/deviceStatuses`,
         { $top: top }
       );
       return { content: [{ type: 'text', text: JSON.stringify(statuses, null, 2) }] };
@@ -1121,7 +1128,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'Get details of a specific managed device.',
     { deviceId: z.string() },
     async ({ deviceId }) => {
-      const device = await graph.get(`/deviceManagement/managedDevices/${deviceId}`);
+      const device = await graph.get(`/deviceManagement/managedDevices/${encodeId(deviceId)}`);
       return { content: [{ type: 'text', text: JSON.stringify(device, null, 2) }] };
     }
   );
@@ -1131,7 +1138,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'Trigger an immediate Intune policy sync on a managed device.',
     { deviceId: z.string() },
     async ({ deviceId }) => {
-      await graph.post(`/deviceManagement/managedDevices/${deviceId}/syncDevice`, {});
+      await graph.post(`/deviceManagement/managedDevices/${encodeId(deviceId)}/syncDevice`, {});
       return { content: [{ type: 'text', text: `Sync triggered for device ${deviceId}.` }] };
     }
   );
@@ -1141,7 +1148,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'Reboot a managed Windows device.',
     { deviceId: z.string() },
     async ({ deviceId }) => {
-      await graph.post(`/deviceManagement/managedDevices/${deviceId}/rebootNow`, {});
+      await graph.post(`/deviceManagement/managedDevices/${encodeId(deviceId)}/rebootNow`, {});
       return { content: [{ type: 'text', text: `Reboot triggered for device ${deviceId}.` }] };
     }
   );
@@ -1151,7 +1158,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'Retire (unenroll) a managed device from Intune. Removes corporate data but keeps personal data.',
     { deviceId: z.string() },
     async ({ deviceId }) => {
-      await graph.post(`/deviceManagement/managedDevices/${deviceId}/retire`, {});
+      await graph.post(`/deviceManagement/managedDevices/${encodeId(deviceId)}/retire`, {});
       return { content: [{ type: 'text', text: `Device ${deviceId} retired.` }] };
     }
   );
@@ -1167,7 +1174,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
         .describe('Keep user data on the device (supported on some platforms)'),
     },
     async ({ deviceId, keepEnrollmentData, keepUserData }) => {
-      await graph.post(`/deviceManagement/managedDevices/${deviceId}/wipe`, {
+      await graph.post(`/deviceManagement/managedDevices/${encodeId(deviceId)}/wipe`, {
         keepEnrollmentData,
         keepUserData,
       });
@@ -1180,7 +1187,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'Shut down a managed Windows device.',
     { deviceId: z.string() },
     async ({ deviceId }) => {
-      await graph.post(`/deviceManagement/managedDevices/${deviceId}/shutDown`, {});
+      await graph.post(`/deviceManagement/managedDevices/${encodeId(deviceId)}/shutDown`, {});
       return { content: [{ type: 'text', text: `Shutdown triggered for device ${deviceId}.` }] };
     }
   );
@@ -1190,7 +1197,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'Remotely lock a managed device. The device will require a PIN/password to unlock.',
     { deviceId: z.string() },
     async ({ deviceId }) => {
-      await graph.post(`/deviceManagement/managedDevices/${deviceId}/remoteLock`, {});
+      await graph.post(`/deviceManagement/managedDevices/${encodeId(deviceId)}/remoteLock`, {});
       return { content: [{ type: 'text', text: `Remote lock triggered for device ${deviceId}.` }] };
     }
   );
@@ -1203,7 +1210,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
       deviceName: z.string().max(15).describe('New device name (max 15 chars, letters/numbers/hyphens)'),
     },
     async ({ deviceId, deviceName }) => {
-      await graph.post(`/deviceManagement/managedDevices/${deviceId}/setDeviceName`, { deviceName });
+      await graph.post(`/deviceManagement/managedDevices/${encodeId(deviceId)}/setDeviceName`, { deviceName });
       return { content: [{ type: 'text', text: `Device rename to "${deviceName}" triggered for device ${deviceId}.` }] };
     }
   );
@@ -1216,7 +1223,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
       quickScan: z.boolean().default(true).describe('true = quick scan, false = full scan (takes longer)'),
     },
     async ({ deviceId, quickScan }) => {
-      await graph.post(`/deviceManagement/managedDevices/${deviceId}/windowsDefenderScan`, { quickScan });
+      await graph.post(`/deviceManagement/managedDevices/${encodeId(deviceId)}/windowsDefenderScan`, { quickScan });
       return { content: [{ type: 'text', text: `Windows Defender ${quickScan ? 'quick' : 'full'} scan triggered for device ${deviceId}.` }] };
     }
   );
@@ -1226,7 +1233,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'Force a Windows Defender signature/definition update on a managed Windows device.',
     { deviceId: z.string() },
     async ({ deviceId }) => {
-      await graph.post(`/deviceManagement/managedDevices/${deviceId}/windowsDefenderUpdateSignatures`, {});
+      await graph.post(`/deviceManagement/managedDevices/${encodeId(deviceId)}/windowsDefenderUpdateSignatures`, {});
       return { content: [{ type: 'text', text: `Defender signature update triggered for device ${deviceId}.` }] };
     }
   );
@@ -1236,7 +1243,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'Rotate the BitLocker recovery key for a managed Windows device. The new key will be escrowed to Entra ID / Intune.',
     { deviceId: z.string() },
     async ({ deviceId }) => {
-      await graph.post(`/deviceManagement/managedDevices/${deviceId}/rotateBitLockerKeys`, {});
+      await graph.post(`/deviceManagement/managedDevices/${encodeId(deviceId)}/rotateBitLockerKeys`, {});
       return { content: [{ type: 'text', text: `BitLocker key rotation triggered for device ${deviceId}.` }] };
     }
   );
@@ -1246,7 +1253,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'Rotate the local administrator password (LAPS) for a managed Windows device. Requires Windows LAPS configured in Intune.',
     { deviceId: z.string() },
     async ({ deviceId }) => {
-      await graph.post(`/deviceManagement/managedDevices/${deviceId}/rotateLocalAdminPassword`, {});
+      await graph.post(`/deviceManagement/managedDevices/${encodeId(deviceId)}/rotateLocalAdminPassword`, {});
       return { content: [{ type: 'text', text: `Local admin password rotation triggered for device ${deviceId}.` }] };
     }
   );
@@ -1261,7 +1268,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     },
     async ({ deviceId, notificationTitle, notificationBody }) => {
       await graph.post(
-        `/deviceManagement/managedDevices/${deviceId}/sendCustomNotificationToCompanyPortal`,
+        `/deviceManagement/managedDevices/${encodeId(deviceId)}/sendCustomNotificationToCompanyPortal`,
         { notificationTitle, notificationBody }
       );
       return { content: [{ type: 'text', text: `Notification sent to device ${deviceId}.` }] };
@@ -1273,7 +1280,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'Disable a managed device in Intune. The device will lose access to corporate resources but remains enrolled.',
     { deviceId: z.string() },
     async ({ deviceId }) => {
-      await graph.post(`/deviceManagement/managedDevices/${deviceId}/disable`, {});
+      await graph.post(`/deviceManagement/managedDevices/${encodeId(deviceId)}/disable`, {});
       return { content: [{ type: 'text', text: `Device ${deviceId} disabled.` }] };
     }
   );
@@ -1283,7 +1290,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'Re-enable a previously disabled managed device in Intune.',
     { deviceId: z.string() },
     async ({ deviceId }) => {
-      await graph.post(`/deviceManagement/managedDevices/${deviceId}/reenable`, {});
+      await graph.post(`/deviceManagement/managedDevices/${encodeId(deviceId)}/reenable`, {});
       return { content: [{ type: 'text', text: `Device ${deviceId} re-enabled.` }] };
     }
   );
@@ -1297,7 +1304,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     },
     async ({ deviceId, scriptId }) => {
       await graph.post(
-        `/deviceManagement/managedDevices/${deviceId}/initiateOnDemandProactiveRemediation`,
+        `/deviceManagement/managedDevices/${encodeId(deviceId)}/initiateOnDemandProactiveRemediation`,
         { scriptPolicyId: scriptId }
       );
       return { content: [{ type: 'text', text: `Proactive remediation triggered on device ${deviceId} for script ${scriptId}.` }] };
@@ -1309,10 +1316,17 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'Trigger the "Collect diagnostics" remote action on an Intune-managed device (beta API). Returns a log collection request ID — use list_device_diagnostics to poll status and download_device_diagnostics to get the ZIP download URL once completed.',
     { deviceId: z.string().describe('Intune managed device ID') },
     async ({ deviceId }) => {
+      // The templateType parameter is a complex type; the Graph spec example
+      // wraps the enum value along with @odata.type. Passing a bare string
+      // causes the call to be rejected with a 400 on some tenants.
+      // See: https://learn.microsoft.com/en-us/graph/api/intune-devices-manageddevice-createdevicelogcollectionrequest
       const result = await graph.beta.post(
-        `/deviceManagement/managedDevices('${deviceId}')/createDeviceLogCollectionRequest`,
+        `/deviceManagement/managedDevices('${odataQuote(deviceId)}')/createDeviceLogCollectionRequest`,
         {
-          templateType: { templateType: 'predefined' },
+          templateType: {
+            '@odata.type': 'microsoft.graph.deviceLogCollectionRequest',
+            templateType: 'predefined',
+          },
         }
       );
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
@@ -1328,8 +1342,8 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     },
     async ({ deviceId, requestId }) => {
       const url = requestId
-        ? `/deviceManagement/managedDevices('${deviceId}')/logCollectionRequests('${requestId}')`
-        : `/deviceManagement/managedDevices('${deviceId}')/logCollectionRequests`;
+        ? `/deviceManagement/managedDevices('${odataQuote(deviceId)}')/logCollectionRequests('${odataQuote(requestId)}')`
+        : `/deviceManagement/managedDevices('${odataQuote(deviceId)}')/logCollectionRequests`;
       const result = await graph.beta.get(url);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
@@ -1344,7 +1358,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     },
     async ({ deviceId, requestId }) => {
       const result = await graph.beta.post(
-        `/deviceManagement/managedDevices('${deviceId}')/logCollectionRequests('${requestId}')/createDownloadUrl`,
+        `/deviceManagement/managedDevices('${odataQuote(deviceId)}')/logCollectionRequests('${odataQuote(requestId)}')/createDownloadUrl`,
         {}
       );
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
@@ -1401,8 +1415,8 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     { templateId: z.string() },
     async ({ templateId }) => {
       const [template, messages] = await Promise.all([
-        graph.get(`/deviceManagement/notificationMessageTemplates/${templateId}`),
-        graph.getAll(`/deviceManagement/notificationMessageTemplates/${templateId}/localizedNotificationMessages`),
+        graph.get(`/deviceManagement/notificationMessageTemplates/${encodeId(templateId)}`),
+        graph.getAll(`/deviceManagement/notificationMessageTemplates/${encodeId(templateId)}/localizedNotificationMessages`),
       ]);
       return { content: [{ type: 'text', text: JSON.stringify({ template, localizedMessages: messages }, null, 2) }] };
     }
@@ -1460,7 +1474,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
       if (defaultLocale) body.defaultLocale = defaultLocale;
       if (brandingOptions) body.brandingOptions = brandingOptions;
       if (roleScopeTagIds) body.roleScopeTagIds = roleScopeTagIds;
-      const template = await graph.patch(`/deviceManagement/notificationMessageTemplates/${templateId}`, body);
+      const template = await graph.patch(`/deviceManagement/notificationMessageTemplates/${encodeId(templateId)}`, body);
       return { content: [{ type: 'text', text: JSON.stringify(template, null, 2) }] };
     }
   );
@@ -1470,7 +1484,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'Delete an Intune notification message template.',
     { templateId: z.string() },
     async ({ templateId }) => {
-      await graph.delete(`/deviceManagement/notificationMessageTemplates/${templateId}`);
+      await graph.delete(`/deviceManagement/notificationMessageTemplates/${encodeId(templateId)}`);
       return { content: [{ type: 'text', text: `Notification template ${templateId} deleted.` }] };
     }
   );
@@ -1494,7 +1508,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
         isDefault,
       };
       const msg = await graph.post(
-        `/deviceManagement/notificationMessageTemplates/${templateId}/localizedNotificationMessages`,
+        `/deviceManagement/notificationMessageTemplates/${encodeId(templateId)}/localizedNotificationMessages`,
         body
       );
       return { content: [{ type: 'text', text: JSON.stringify(msg, null, 2) }] };
@@ -1506,7 +1520,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'Send a test notification email using the template (uses the default locale).',
     { templateId: z.string() },
     async ({ templateId }) => {
-      await graph.post(`/deviceManagement/notificationMessageTemplates/${templateId}/sendTestMessage`, {});
+      await graph.post(`/deviceManagement/notificationMessageTemplates/${encodeId(templateId)}/sendTestMessage`, {});
       return { content: [{ type: 'text', text: `Test message sent for template ${templateId}.` }] };
     }
   );

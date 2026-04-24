@@ -326,4 +326,84 @@ describe('Intune Tools', () => {
       expect(url).toBe('/deviceManagement/notificationMessageTemplates/tmpl1/sendTestMessage');
     });
   });
+
+  // ── Bug-fix regression tests ──────────────────────────────────────────────
+
+  describe('collect_device_diagnostics', () => {
+    it('sends templateType as a complex object with @odata.type', async () => {
+      graph.beta.post.mockResolvedValue({ id: 'req1' });
+      await server.call('collect_device_diagnostics', { deviceId: 'dev1' });
+      const [, body] = args(graph.beta.post);
+      expect(body.templateType).toEqual({
+        '@odata.type': 'microsoft.graph.deviceLogCollectionRequest',
+        templateType: 'predefined',
+      });
+    });
+
+    it("wraps deviceId in single-quoted key-segment and escapes embedded quotes", async () => {
+      graph.beta.post.mockResolvedValue({ id: 'req1' });
+      await server.call('collect_device_diagnostics', { deviceId: "d'1" });
+      const [url] = args(graph.beta.post);
+      expect(url).toBe(
+        "/deviceManagement/managedDevices('d''1')/createDeviceLogCollectionRequest"
+      );
+    });
+  });
+
+  describe('get_intune_app_install_status', () => {
+    it('fetches the full app (no $select) so @odata.type is preserved', async () => {
+      graph.get.mockResolvedValue({
+        id: 'app1',
+        displayName: 'Office',
+        '@odata.type': '#microsoft.graph.win32LobApp',
+        publishingState: 'published',
+      });
+      graph.post.mockResolvedValue({ Schema: [], Values: [] });
+      graph.beta.get.mockResolvedValue({ installedDeviceCount: 5 });
+
+      await server.call('get_intune_app_install_status', { appId: 'app1' });
+
+      const [appUrl, appParams] = args(graph.get);
+      expect(appUrl).toBe('/deviceAppManagement/mobileApps/app1');
+      expect(appParams).toBeUndefined();
+    });
+
+    it('skips the installSummary call when @odata.type is missing', async () => {
+      graph.get.mockResolvedValue({ id: 'app1', displayName: 'Foo' }); // no @odata.type
+      graph.post.mockResolvedValue({ Schema: [], Values: [] });
+
+      await server.call('get_intune_app_install_status', { appId: 'app1' });
+
+      expect(graph.beta.get).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('URL-encoding of opaque ids', () => {
+    it('encodes appId in mobileApps path', async () => {
+      graph.get.mockResolvedValue({ id: 'a/1' });
+      await server.call('get_intune_app', { appId: 'a/1' });
+      const [url] = args(graph.get);
+      expect(url).toBe('/deviceAppManagement/mobileApps/a%2F1');
+    });
+
+    it('encodes deviceId in managedDevices actions', async () => {
+      graph.post.mockResolvedValue(undefined);
+      await server.call('sync_managed_device', { deviceId: 'd/1' });
+      expect(graph.post).toHaveBeenCalledWith(
+        '/deviceManagement/managedDevices/d%2F1/syncDevice', {},
+      );
+    });
+
+    it('encodes policyId in deviceCompliancePolicies path', async () => {
+      graph.get.mockResolvedValue({ id: 'p/1' });
+      await server.call('get_compliance_policy', { policyId: 'p/1' });
+      expect(graph.get).toHaveBeenCalledWith('/deviceManagement/deviceCompliancePolicies/p%2F1');
+    });
+
+    it('encodes configId in deviceConfigurations path', async () => {
+      graph.get.mockResolvedValue({ id: 'c/1' });
+      await server.call('get_device_configuration', { configId: 'c/1' });
+      expect(graph.get).toHaveBeenCalledWith('/deviceManagement/deviceConfigurations/c%2F1');
+    });
+  });
 });

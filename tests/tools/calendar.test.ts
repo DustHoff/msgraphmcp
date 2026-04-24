@@ -57,7 +57,9 @@ describe('Calendar Tools', () => {
       graph.post.mockResolvedValue({ id: 'ev1' });
       await server.call('create_event', baseEvent);
       const [url, body] = args(graph.post);
-      expect(url).toContain('/users/me/events');
+      // userPath('me') collapses to the dedicated /me endpoint, so the
+      // path does NOT contain `/users/me` — it is just `/me/events`.
+      expect(url).toBe('/me/events');
       expect(body.subject).toBe('Team Meeting');
       expect(body.start.dateTime).toBe('2024-06-01T10:00:00');
     });
@@ -95,7 +97,7 @@ describe('Calendar Tools', () => {
     it('calls DELETE on the event', async () => {
       graph.delete.mockResolvedValue(undefined);
       await server.call('delete_event', { eventId: 'ev1' });
-      expect(graph.delete).toHaveBeenCalledWith('/users/me/events/ev1');
+      expect(graph.delete).toHaveBeenCalledWith('/me/events/ev1');
     });
   });
 });

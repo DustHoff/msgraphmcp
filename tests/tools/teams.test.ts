@@ -75,4 +75,19 @@ describe('Teams Tools', () => {
       expect(graph.delete).toHaveBeenCalledWith('/teams/t1/channels/c1');
     });
   });
+
+  describe('URL-encoding of opaque ids', () => {
+    it('encodes teamId and channelId in path', async () => {
+      graph.delete.mockResolvedValue(undefined);
+      await server.call('delete_channel', { teamId: 't/1', channelId: 'c?1' });
+      expect(graph.delete).toHaveBeenCalledWith('/teams/t%2F1/channels/c%3F1');
+    });
+
+    it('encodes userId in @odata.bind for add_team_member', async () => {
+      graph.post.mockResolvedValue({ id: 'm1' });
+      await server.call('add_team_member', { teamId: 't1', userId: 'u/1' });
+      const [, body] = args(graph.post);
+      expect(body['user@odata.bind']).toBe('https://graph.microsoft.com/v1.0/users/u%2F1');
+    });
+  });
 });

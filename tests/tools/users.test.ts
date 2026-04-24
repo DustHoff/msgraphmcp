@@ -27,7 +27,9 @@ describe('User Tools', () => {
     it('calls getAll on /users', async () => {
       graph.getAll.mockResolvedValue([{ id: '1', displayName: 'Alice' }]);
       const result = await server.call('list_users', {});
-      expect(graph.getAll).toHaveBeenCalledWith('/users', expect.any(Object));
+      // getAll now accepts (url, params, config?); config is undefined when
+      // the query does not require ConsistencyLevel: eventual.
+      expect(graph.getAll).toHaveBeenCalledWith('/users', expect.any(Object), undefined);
       expect(result.content[0].text).toContain('Alice');
     });
 

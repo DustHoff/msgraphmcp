@@ -1,6 +1,15 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { GraphClient } from '../graph/GraphClient';
+import { encodeId } from './shared';
+
+// SharePoint composite site ids of the form `hostname,siteCollectionId,siteId`
+// are a documented Graph convention. The commas MUST be preserved verbatim in
+// the URL path — percent-encoding them turns the value into a different
+// opaque id and the API returns 404. Everything else is safe to encode.
+function encodeSiteId(siteId: string): string {
+  return siteId.split(',').map(encodeURIComponent).join(',');
+}
 
 export function registerSiteTools(server: McpServer, graph: GraphClient) {
   server.tool(
@@ -29,9 +38,11 @@ export function registerSiteTools(server: McpServer, graph: GraphClient) {
     async ({ siteId, hostname, sitePath }) => {
       let url: string;
       if (siteId) {
-        url = `/sites/${siteId}`;
+        url = `/sites/${encodeSiteId(siteId)}`;
       } else if (hostname && sitePath) {
-        url = `/sites/${hostname}:${sitePath}`;
+        const normalizedPath = sitePath.startsWith('/') ? sitePath : `/${sitePath}`;
+        const encodedPath = normalizedPath.split('/').map(encodeURIComponent).join('/');
+        url = `/sites/${encodeURIComponent(hostname)}:${encodedPath}`;
       } else {
         url = '/sites/root';
       }
@@ -45,7 +56,10 @@ export function registerSiteTools(server: McpServer, graph: GraphClient) {
     'Search for SharePoint sites by keyword.',
     { query: z.string() },
     async ({ query }) => {
-      const sites = await graph.get(`/sites?search=${encodeURIComponent(query)}`);
+      // /sites?search={q} is the documented SharePoint site search form;
+      // `search` is not prefixed with `$` for this endpoint. Pass through the
+      // axios params object so the value is properly percent-encoded.
+      const sites = await graph.get('/sites', { search: query });
       return { content: [{ type: 'text', text: JSON.stringify(sites, null, 2) }] };
     }
   );
@@ -55,7 +69,7 @@ export function registerSiteTools(server: McpServer, graph: GraphClient) {
     'List lists/libraries within a SharePoint site.',
     { siteId: z.string() },
     async ({ siteId }) => {
-      const lists = await graph.getAll(`/sites/${siteId}/lists`);
+      const lists = await graph.getAll(`/sites/${encodeSiteId(siteId)}/lists`);
       return { content: [{ type: 'text', text: JSON.stringify(lists, null, 2) }] };
     }
   );
@@ -68,7 +82,7 @@ export function registerSiteTools(server: McpServer, graph: GraphClient) {
       listId: z.string().describe('List id or display name'),
     },
     async ({ siteId, listId }) => {
-      const list = await graph.get(`/sites/${siteId}/lists/${listId}`);
+      const list = await graph.get(`/sites/${encodeSiteId(siteId)}/lists/${encodeId(listId)}`);
       return { content: [{ type: 'text', text: JSON.stringify(list, null, 2) }] };
     }
   );
@@ -87,7 +101,7 @@ export function registerSiteTools(server: McpServer, graph: GraphClient) {
       const params: Record<string, unknown> = { $top: top };
       if (filter) params['$filter'] = filter;
       if (expand) params['$expand'] = expand;
-      const items = await graph.get(`/sites/${siteId}/lists/${listId}/items`, params);
+      const items = await graph.get(`/sites/${encodeSiteId(siteId)}/lists/${encodeId(listId)}/items`, params);
       return { content: [{ type: 'text', text: JSON.stringify(items, null, 2) }] };
     }
   );
@@ -101,7 +115,10 @@ export function registerSiteTools(server: McpServer, graph: GraphClient) {
       itemId: z.string(),
     },
     async ({ siteId, listId, itemId }) => {
-      const item = await graph.get(`/sites/${siteId}/lists/${listId}/items/${itemId}?$expand=fields`);
+      const item = await graph.get(
+        `/sites/${encodeSiteId(siteId)}/lists/${encodeId(listId)}/items/${encodeId(itemId)}`,
+        { $expand: 'fields' },
+      );
       return { content: [{ type: 'text', text: JSON.stringify(item, null, 2) }] };
     }
   );
@@ -115,7 +132,7 @@ export function registerSiteTools(server: McpServer, graph: GraphClient) {
       fields: z.record(z.unknown()).describe('Key-value pairs of column names and values'),
     },
     async ({ siteId, listId, fields }) => {
-      const item = await graph.post(`/sites/${siteId}/lists/${listId}/items`, { fields });
+      const item = await graph.post(`/sites/${encodeSiteId(siteId)}/lists/${encodeId(listId)}/items`, { fields });
       return { content: [{ type: 'text', text: JSON.stringify(item, null, 2) }] };
     }
   );
@@ -130,7 +147,10 @@ export function registerSiteTools(server: McpServer, graph: GraphClient) {
       fields: z.record(z.unknown()),
     },
     async ({ siteId, listId, itemId, fields }) => {
-      const item = await graph.patch(`/sites/${siteId}/lists/${listId}/items/${itemId}/fields`, fields);
+      const item = await graph.patch(
+        `/sites/${encodeSiteId(siteId)}/lists/${encodeId(listId)}/items/${encodeId(itemId)}/fields`,
+        fields,
+      );
       return { content: [{ type: 'text', text: JSON.stringify(item, null, 2) }] };
     }
   );
@@ -144,7 +164,7 @@ export function registerSiteTools(server: McpServer, graph: GraphClient) {
       itemId: z.string(),
     },
     async ({ siteId, listId, itemId }) => {
-      await graph.delete(`/sites/${siteId}/lists/${listId}/items/${itemId}`);
+      await graph.delete(`/sites/${encodeSiteId(siteId)}/lists/${encodeId(listId)}/items/${encodeId(itemId)}`);
       return { content: [{ type: 'text', text: 'List item deleted.' }] };
     }
   );

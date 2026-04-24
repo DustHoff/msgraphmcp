@@ -6,6 +6,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { TokenManager, AuthRequiredError } from './auth/TokenManager';
 import { GraphClient } from './graph/GraphClient';
 import { registerAllTools } from './tools/index';
+import { escapeHtml } from './tools/shared';
 import { logger } from './logger';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -448,6 +449,10 @@ h1{color:#16a34a;margin:0 0 .5rem}p{color:#555;margin:0}</style></head>
 }
 
 function errorPage(detail: string): string {
+  // Escape all five HTML-significant characters. Escaping only `<` is not
+  // sufficient: the browser decodes HTML numeric entities like `&#60;` back
+  // into `<` before parsing, so a payload that never contains a literal `<`
+  // can still open a script tag once rendered.
   return `<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="utf-8"><title>Auth error</title>
@@ -457,7 +462,7 @@ min-height:100vh;margin:0;background:#fef2f2}
 h1{color:#dc2626;margin:0 0 .5rem}p{color:#555;margin:0;font-size:.9rem}</style></head>
 <body><div class="card">
 <h1>Authentication failed</h1>
-<p>${detail.replace(/</g, '&lt;')}</p>
+<p>${escapeHtml(detail)}</p>
 </div></body></html>`;
 }
 
