@@ -597,9 +597,12 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
 
   server.tool(
     'update_intune_app',
-    'Update properties of an existing Intune app. For Win32 LOB apps use "rules" to replace detection/requirement rules.',
+    'Update properties of an existing Intune app. Common mobileApp fields apply to any app; ' +
+    'Win32-specific fields (installCommandLine, returnCodes, rules, installExperience, system requirements, …) ' +
+    'auto-mark the body as #microsoft.graph.win32LobApp.',
     {
       appId: z.string(),
+      // ── Common mobileApp fields ─────────────────────────────────────────
       displayName: z.string().optional(),
       publisher: z.string().optional(),
       description: z.string().optional(),
@@ -607,20 +610,66 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
       privacyInformationUrl: z.string().url().optional(),
       informationUrl: z.string().url().optional(),
       notes: z.string().optional(),
+      owner: z.string().optional(),
+      developer: z.string().optional(),
+      roleScopeTagIds: z.array(z.string()).optional()
+        .describe('Role scope tag ids assigned to the app'),
+      largeIcon: z.object({
+        type: z.string().describe('MIME type, e.g. "image/png"'),
+        value: z.string().describe('Base64-encoded icon bytes'),
+      }).optional()
+        .describe('App icon (mimeContent). Pass null-equivalent by omitting; cannot clear via this tool.'),
+      // ── Win32 LOB app fields ────────────────────────────────────────────
+      installCommandLine: z.string().optional()
+        .describe('Win32: install command, e.g. "setup.exe /S"'),
+      uninstallCommandLine: z.string().optional()
+        .describe('Win32: uninstall command'),
+      setupFilePath: z.string().optional()
+        .describe('Win32: name of the main installer file inside the package'),
+      applicableArchitectures: z.string().optional()
+        .describe('Win32: comma-separated architectures, e.g. "x64" or "x86,x64"'),
+      allowedArchitectures: z.string().optional()
+        .describe('Win32: comma-separated architectures actually allowed for install'),
+      minimumSupportedWindowsRelease: z.string().optional()
+        .describe('Win32: minimum Windows feature release, e.g. "1607" or "21H2"'),
+      minimumFreeDiskSpaceInMB: z.number().int().min(0).optional(),
+      minimumMemoryInMB: z.number().int().min(0).optional(),
+      minimumNumberOfProcessors: z.number().int().min(0).optional(),
+      minimumCpuSpeedInMHz: z.number().int().min(0).optional(),
+      displayVersion: z.string().optional()
+        .describe('Win32: human-readable version string'),
+      installExperience: z.object({
+        runAsAccount: z.enum(['system', 'user']).optional(),
+        deviceRestartBehavior: z.enum(['allow', 'basedOnReturnCode', 'suppress', 'force']).optional(),
+        maxRunTimeInMinutes: z.number().int().min(0).optional(),
+      }).optional()
+        .describe('Win32: install experience block (replaces existing)'),
+      returnCodes: z.array(z.object({
+        returnCode: z.number().int(),
+        type: z.enum(['failed', 'success', 'softReboot', 'hardReboot', 'retry']),
+      })).optional()
+        .describe('Win32: return-code list (replaces existing). Common defaults: 0/1707=success, 3010=softReboot, 1641=hardReboot, 1618=retry.'),
       rules: z.array(win32LobAppRuleSchema).optional()
-        .describe('Detection/requirement rules for Win32 LOB apps (replaces all existing rules). Graph API field name is "rules".'),
+        .describe('Win32: detection/requirement rules (replaces existing). Graph API field name is "rules".'),
     },
-    async ({ appId, rules, ...props }) => {
+    async ({ appId, ...props }) => {
+      const win32OnlyFields = new Set([
+        'installCommandLine', 'uninstallCommandLine', 'setupFilePath',
+        'applicableArchitectures', 'allowedArchitectures',
+        'minimumSupportedWindowsRelease', 'minimumFreeDiskSpaceInMB',
+        'minimumMemoryInMB', 'minimumNumberOfProcessors', 'minimumCpuSpeedInMHz',
+        'displayVersion', 'installExperience', 'returnCodes', 'rules',
+      ]);
       const body: Record<string, unknown> = Object.fromEntries(
         Object.entries(props).filter(([, v]) => v !== undefined)
       );
-      if (rules !== undefined) {
-        body.rules = rules;
-        // Graph API requires @odata.type on the app body when patching win32LobApp-specific fields
-        body['@odata.type'] = '#microsoft.graph.win32LobApp';
-      }
       if (Object.keys(body).length === 0) {
         return { content: [{ type: 'text', text: 'No fields provided — nothing to update.' }] };
+      }
+      const hasWin32Field = Object.keys(body).some((k) => win32OnlyFields.has(k));
+      if (hasWin32Field) {
+        // Graph API requires @odata.type on the app body when patching win32LobApp-specific fields
+        body['@odata.type'] = '#microsoft.graph.win32LobApp';
       }
       await graph.patch(`/deviceAppManagement/mobileApps/${encodeId(appId)}`, body);
       return { content: [{ type: 'text', text: `App ${appId} updated.` }] };
@@ -1030,17 +1079,17 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
 
   server.tool(
     'list_intune_app_relationships',
-    'List supersedence and dependency relationships of an Intune app.',
+    'List supersedence and dependency relationships of an Intune app. Uses the beta endpoint — v1.0 does not expose relationships.',
     { appId: z.string() },
     async ({ appId }) => {
-      const relationships = await graph.getAll(`/deviceAppManagement/mobileApps/${encodeId(appId)}/relationships`);
+      const relationships = await graph.beta.getAll(`/deviceAppManagement/mobileApps/${encodeId(appId)}/relationships`);
       return { content: [{ type: 'text', text: JSON.stringify(relationships, null, 2) }] };
     }
   );
 
   server.tool(
     'set_intune_app_relationships',
-    'Set supersedence and/or dependency relationships for an Intune app. Replaces all existing relationships.',
+    'Set supersedence and/or dependency relationships for an Intune app. Replaces all existing relationships. Uses the beta endpoint — v1.0 does not expose updateRelationships.',
     {
       appId: z.string(),
       relationships: z.array(z.object({
@@ -1064,7 +1113,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
           ...(r.dependencyType ? { dependencyType: r.dependencyType } : {}),
         })),
       };
-      await graph.post(`/deviceAppManagement/mobileApps/${encodeId(appId)}/updateRelationships`, body);
+      await graph.beta.post(`/deviceAppManagement/mobileApps/${encodeId(appId)}/updateRelationships`, body);
       return { content: [{ type: 'text', text: `App ${appId}: ${relationships.length} relationship(s) set.` }] };
     }
   );
