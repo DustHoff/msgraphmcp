@@ -183,10 +183,15 @@ describe('Intune Tools', () => {
       expect(body.mobileAppAssignments[0].target.groupId).toBe('g1');
     });
 
-    it('requires at least one assignment', async () => {
-      await expect(server.call('assign_intune_app', {
+    it('clears all assignments when given an empty array', async () => {
+      graph.post.mockResolvedValue(undefined);
+      const result = await server.call('assign_intune_app', {
         appId: 'app1', assignments: [],
-      })).rejects.toThrow();
+      });
+      const [url, body] = args(graph.post);
+      expect(url).toBe('/deviceAppManagement/mobileApps/app1/assign');
+      expect(body.mobileAppAssignments).toEqual([]);
+      expect(result.content[0].text).toMatch(/cleared/);
     });
   });
 
