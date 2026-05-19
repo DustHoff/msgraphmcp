@@ -1233,7 +1233,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
 
   server.tool(
     'set_intune_app_relationships',
-    'Set supersedence and/or dependency relationships for an Intune app. Replaces all existing relationships. Uses the beta endpoint — v1.0 does not expose updateRelationships.',
+    'Set supersedence and/or dependency relationships for an Intune app. Replaces all existing relationships. Pass an empty array to clear all relationships (required before delete_intune_app on a superseded app). Uses the beta endpoint — v1.0 does not expose updateRelationships.',
     {
       appId: z.string(),
       relationships: z.array(z.object({
@@ -1246,7 +1246,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
           .describe('Required for supersedence: "update" keeps the old app, "replace" uninstalls it'),
         dependencyType: z.enum(['detect', 'autoInstall']).optional()
           .describe('Required for dependency: "detect" checks presence, "autoInstall" installs automatically'),
-      })).min(1),
+      })),
     },
     async ({ appId, relationships }) => {
       const body = {
@@ -1258,7 +1258,10 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
         })),
       };
       await graph.beta.post(`/deviceAppManagement/mobileApps/${encodeId(appId)}/updateRelationships`, body);
-      return { content: [{ type: 'text', text: `App ${appId}: ${relationships.length} relationship(s) set.` }] };
+      const msg = relationships.length === 0
+        ? `App ${appId}: all relationships cleared.`
+        : `App ${appId}: ${relationships.length} relationship(s) set.`;
+      return { content: [{ type: 'text', text: msg }] };
     }
   );
 
@@ -1274,10 +1277,10 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
 
   server.tool(
     'assign_intune_app',
-    'Assign an Intune app to Azure AD groups. Replaces all existing assignments.',
+    'Assign an Intune app to Azure AD groups. Replaces all existing assignments. Pass an empty array to clear all assignments (e.g. when retiring an app).',
     {
       appId: z.string(),
-      assignments: z.array(groupAssignmentSchema).min(1),
+      assignments: z.array(groupAssignmentSchema),
     },
     async ({ appId, assignments }) => {
       const body = {
@@ -1289,7 +1292,10 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
         })),
       };
       await graph.post(`/deviceAppManagement/mobileApps/${encodeId(appId)}/assign`, body);
-      return { content: [{ type: 'text', text: `App ${appId} assigned to ${assignments.length} group(s).` }] };
+      const msg = assignments.length === 0
+        ? `App ${appId}: all assignments cleared.`
+        : `App ${appId} assigned to ${assignments.length} group(s).`;
+      return { content: [{ type: 'text', text: msg }] };
     }
   );
 
