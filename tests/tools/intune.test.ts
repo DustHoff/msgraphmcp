@@ -1,6 +1,67 @@
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import AdmZip from 'adm-zip';
 import { MockMcpServer } from '../helpers/MockMcpServer';
 import { args, createMockGraphClient } from '../helpers/mockGraphClient';
 import { registerIntuneTools } from '../../src/tools/intune';
+
+// ── Synthetic .intunewin builder ──────────────────────────────────────────
+// IntuneWinAppUtil-produced packages have Detection.xml + an encrypted blob.
+// Tests need only the XML; the blob is replaced with a placeholder because
+// the upload step is bypassed before any byte is touched.
+const MSI_DETECTION_XML = `<?xml version="1.0" encoding="utf-8"?>
+<ApplicationInfo ToolVersion="1.8.4.0">
+  <FileName>IntunePackage.intunewin</FileName>
+  <UnencryptedContentSize>1024</UnencryptedContentSize>
+  <EncryptionInfo>
+    <EncryptionKey>AAAA</EncryptionKey>
+    <MacKey>BBBB</MacKey>
+    <InitializationVector>CCCC</InitializationVector>
+    <Mac>DDDD</Mac>
+    <FileDigest>EEEE</FileDigest>
+    <FileDigestAlgorithm>SHA256</FileDigestAlgorithm>
+    <ProfileIdentifier>ProfileVersion1</ProfileIdentifier>
+  </EncryptionInfo>
+  <MsiInfo>
+    <MsiProductCode>{12345678-1234-1234-1234-123456789012}</MsiProductCode>
+    <MsiProductVersion>1.2.3</MsiProductVersion>
+    <MsiPackageCode>{AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}</MsiPackageCode>
+    <MsiUpgradeCode>{BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB}</MsiUpgradeCode>
+    <MsiExecutionContext>System</MsiExecutionContext>
+    <MsiRequiresReboot>false</MsiRequiresReboot>
+    <MsiIsMachineInstall>true</MsiIsMachineInstall>
+    <MsiIsUserInstall>false</MsiIsUserInstall>
+    <MsiPublisher>Test Corp</MsiPublisher>
+  </MsiInfo>
+</ApplicationInfo>`;
+
+const EXE_DETECTION_XML = `<?xml version="1.0" encoding="utf-8"?>
+<ApplicationInfo ToolVersion="1.8.4.0">
+  <FileName>IntunePackage.intunewin</FileName>
+  <UnencryptedContentSize>1024</UnencryptedContentSize>
+  <EncryptionInfo>
+    <EncryptionKey>AAAA</EncryptionKey>
+    <MacKey>BBBB</MacKey>
+    <InitializationVector>CCCC</InitializationVector>
+    <Mac>DDDD</Mac>
+    <FileDigest>EEEE</FileDigest>
+    <FileDigestAlgorithm>SHA256</FileDigestAlgorithm>
+    <ProfileIdentifier>ProfileVersion1</ProfileIdentifier>
+  </EncryptionInfo>
+</ApplicationInfo>`;
+
+function makeIntuneWin(detectionXml: string): string {
+  const zip = new AdmZip();
+  zip.addFile('IntuneWinPackage/Metadata/Detection.xml', Buffer.from(detectionXml));
+  zip.addFile('IntuneWinPackage/Contents/IntunePackage.intunewin', Buffer.from('dummy-payload'));
+  const tmpPath = path.join(
+    os.tmpdir(),
+    `intunewin-test-${Date.now()}-${Math.random().toString(36).slice(2)}.intunewin`,
+  );
+  zip.writeZip(tmpPath);
+  return tmpPath;
+}
 
 describe('Intune Tools', () => {
   let server: MockMcpServer;
@@ -375,6 +436,157 @@ describe('Intune Tools', () => {
       await server.call('get_intune_app_install_status', { appId: 'app1' });
 
       expect(graph.beta.get).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── Win32 LOB upload: detection rules at create time (issue #3) ──────────
+
+  describe('upload_win32_lob_app', () => {
+    // Tracks tmp .intunewin files we built so we can clean up after each case.
+    let tmpFiles: string[] = [];
+    afterEach(() => {
+      for (const p of tmpFiles) { try { fs.unlinkSync(p); } catch { /* ignore */ } }
+      tmpFiles = [];
+    });
+    const makeFixture = (xml: string): string => {
+      const p = makeIntuneWin(xml);
+      tmpFiles.push(p);
+      return p;
+    };
+
+    // We bail out of the upload chain by failing the second `graph.post`
+    // (the contentVersions POST inside uploadAppContentVersion). The first
+    // POST captures the create body — which is the thing under test —
+    // before the failure, and the handler's catch block cleans up the
+    // shell app via `graph.delete`. This avoids mocking the full
+    // blob-upload + polling chain just to inspect the create body.
+    const armBailOut = () => {
+      graph.post
+        .mockResolvedValueOnce({ id: 'app-new' })
+        .mockRejectedValueOnce(new Error('test bail-out before upload'));
+      graph.delete.mockResolvedValueOnce(undefined);
+    };
+
+    const baseArgs = (filePath: string) => ({
+      filePath,
+      displayName: 'Test App',
+      publisher: 'Test Corp',
+      installCommandLine: 'msiexec /i app.msi /qn',
+      uninstallCommandLine: 'msiexec /x {12345678-1234-1234-1234-123456789012} /qn',
+      setupFilePath: 'app.msi',
+    });
+
+    it('auto-injects a ProductCode detection rule for MSI packages when rules omitted', async () => {
+      armBailOut();
+      const fixture = makeFixture(MSI_DETECTION_XML);
+
+      await expect(server.call('upload_win32_lob_app', baseArgs(fixture)))
+        .rejects.toThrow('test bail-out before upload');
+
+      const [url, body] = args(graph.post, 0);
+      expect(url).toBe('/deviceAppManagement/mobileApps');
+      expect(body['@odata.type']).toBe('#microsoft.graph.win32LobApp');
+      expect(body.rules).toEqual([{
+        '@odata.type': '#microsoft.graph.win32LobAppProductCodeRule',
+        ruleType: 'detection',
+        productCode: '{12345678-1234-1234-1234-123456789012}',
+        productVersionOperator: 'notConfigured',
+        productVersion: null,
+      }]);
+      expect(body.msiInformation).toMatchObject({
+        productCode: '{12345678-1234-1234-1234-123456789012}',
+        productVersion: '1.2.3',
+        upgradeCode: '{BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB}',
+        requiresReboot: false,
+        packageType: 'perMachine',
+        publisher: 'Test Corp',
+      });
+    });
+
+    it('uses caller-supplied rules over the MSI auto-rule', async () => {
+      armBailOut();
+      const fixture = makeFixture(MSI_DETECTION_XML);
+
+      const callerRule = {
+        '@odata.type': '#microsoft.graph.win32LobAppFileSystemRule',
+        ruleType: 'detection' as const,
+        path: 'C:\\Program Files\\MyApp',
+        fileOrFolderName: 'app.exe',
+        operationType: 'exists',
+        operator: 'notConfigured',
+        check32BitOn64System: false,
+      };
+
+      await expect(server.call('upload_win32_lob_app', {
+        ...baseArgs(fixture),
+        rules: [callerRule],
+      })).rejects.toThrow('test bail-out before upload');
+
+      const [, body] = args(graph.post, 0);
+      expect(body.rules).toHaveLength(1);
+      expect(body.rules[0]['@odata.type']).toBe('#microsoft.graph.win32LobAppFileSystemRule');
+      expect(body.rules[0].path).toBe('C:\\Program Files\\MyApp');
+    });
+
+    it('fails fast for EXE packages when no rules are provided', async () => {
+      // No bail-out needed — handler throws before any POST.
+      const fixture = makeFixture(EXE_DETECTION_XML);
+
+      await expect(server.call('upload_win32_lob_app', baseArgs(fixture)))
+        .rejects.toThrow(/No detection rules provided and package is not an MSI/);
+
+      expect(graph.post).not.toHaveBeenCalled();
+    });
+
+    it('accepts EXE packages when caller supplies rules', async () => {
+      armBailOut();
+      const fixture = makeFixture(EXE_DETECTION_XML);
+
+      const callerRule = {
+        '@odata.type': '#microsoft.graph.win32LobAppRegistryRule',
+        ruleType: 'detection' as const,
+        keyPath: 'HKLM\\SOFTWARE\\TestCorp\\MyApp',
+        valueName: 'Version',
+        operationType: 'string',
+        operator: 'equal',
+        comparisonValue: '1.2.3',
+        check32BitOn64System: false,
+      };
+
+      await expect(server.call('upload_win32_lob_app', {
+        ...baseArgs(fixture),
+        rules: [callerRule],
+      })).rejects.toThrow('test bail-out before upload');
+
+      const [, body] = args(graph.post, 0);
+      expect(body.rules).toHaveLength(1);
+      expect(body.rules[0]['@odata.type']).toBe('#microsoft.graph.win32LobAppRegistryRule');
+      // EXE packages have no MsiInfo block — msiInformation must not be set
+      // to an empty/stub object that would overwrite anything in Intune.
+      expect(body.msiInformation).toBeUndefined();
+    });
+
+    it('passes caller returnCodes, displayVersion, roleScopeTagIds and maxRunTimeInMinutes through', async () => {
+      armBailOut();
+      const fixture = makeFixture(MSI_DETECTION_XML);
+
+      await expect(server.call('upload_win32_lob_app', {
+        ...baseArgs(fixture),
+        displayVersion: '1.2.3',
+        roleScopeTagIds: ['tag-1', 'tag-2'],
+        maxRunTimeInMinutes: 90,
+        returnCodes: [
+          { returnCode: 0, type: 'success' as const },
+          { returnCode: 42, type: 'retry' as const },
+        ],
+      })).rejects.toThrow('test bail-out before upload');
+
+      const [, body] = args(graph.post, 0);
+      expect(body.displayVersion).toBe('1.2.3');
+      expect(body.roleScopeTagIds).toEqual(['tag-1', 'tag-2']);
+      expect(body.installExperience.maxRunTimeInMinutes).toBe(90);
+      expect(body.returnCodes).toHaveLength(2);
+      expect(body.returnCodes[1]).toEqual({ returnCode: 42, type: 'retry' });
     });
   });
 

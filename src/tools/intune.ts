@@ -77,6 +77,18 @@ function isPrivateOrLoopbackIp(ip: string, family: number): boolean {
 
 // ─── Win32 LOB upload helpers ─────────────────────────────────────────────────
 
+interface MsiInfo {
+  productCode: string;
+  productVersion?: string;
+  packageCode?: string;
+  upgradeCode?: string;
+  executionContext?: string; // "System" | "User" | "Any"
+  requiresReboot: boolean;
+  isMachineInstall: boolean;
+  isUserInstall: boolean;
+  publisher?: string;
+}
+
 interface IntuneWinInfo {
   fileName: string;
   unencryptedSize: number;
@@ -87,10 +99,71 @@ interface IntuneWinInfo {
   mac: string;
   fileDigest: string;
   fileDigestAlgorithm: string;
+  /** null for EXE packages — Detection.xml has no &lt;MsiInfo&gt; block. */
+  msi: MsiInfo | null;
 }
 
 function xmlValue(xml: string, tag: string): string {
   return xml.match(new RegExp(`<${tag}[^>]*>([^<]*)<\/${tag}>`))?.[1]?.trim() ?? '';
+}
+
+/**
+ * Parse the `<MsiInfo>` block IntuneWinAppUtil writes into Detection.xml when
+ * the source installer is an MSI. EXE-based packages have no such block —
+ * returns null so callers can branch (e.g. auto-detect-rule fallback only
+ * applies to MSI packages).
+ */
+function parseMsiInfo(xml: string): MsiInfo | null {
+  const block = xml.match(/<MsiInfo>([\s\S]*?)<\/MsiInfo>/)?.[1];
+  if (!block) return null;
+  const productCode = xmlValue(block, 'MsiProductCode');
+  if (!productCode) return null;
+  return {
+    productCode,
+    productVersion: xmlValue(block, 'MsiProductVersion') || undefined,
+    packageCode: xmlValue(block, 'MsiPackageCode') || undefined,
+    upgradeCode: xmlValue(block, 'MsiUpgradeCode') || undefined,
+    executionContext: xmlValue(block, 'MsiExecutionContext') || undefined,
+    requiresReboot: xmlValue(block, 'MsiRequiresReboot').toLowerCase() === 'true',
+    isMachineInstall: xmlValue(block, 'MsiIsMachineInstall').toLowerCase() === 'true',
+    isUserInstall: xmlValue(block, 'MsiIsUserInstall').toLowerCase() === 'true',
+    publisher: xmlValue(block, 'MsiPublisher') || undefined,
+  };
+}
+
+/**
+ * Map MsiInfo onto the Graph `msiInformation` shape used on `#microsoft.graph.win32LobApp`.
+ * `packageType` is derived from the execution context flags: per-machine, per-user
+ * or dual-purpose. Returns undefined when no MSI metadata is available (EXE package).
+ */
+function msiInformationFromMsiInfo(msi: MsiInfo | null): Record<string, unknown> | undefined {
+  if (!msi) return undefined;
+  let packageType: 'perMachine' | 'perUser' | 'dualPurpose' = 'perMachine';
+  if (msi.isMachineInstall && msi.isUserInstall) packageType = 'dualPurpose';
+  else if (msi.isUserInstall && !msi.isMachineInstall) packageType = 'perUser';
+  const out: Record<string, unknown> = {
+    productCode: msi.productCode,
+    productVersion: msi.productVersion ?? null,
+    upgradeCode: msi.upgradeCode ?? null,
+    requiresReboot: msi.requiresReboot,
+    packageType,
+  };
+  if (msi.publisher) out.publisher = msi.publisher;
+  return out;
+}
+
+/**
+ * Build a Win32 LOB ProductCode detection rule from MSI metadata. Mirrors what
+ * the Intune portal does when the operator selects "Auto MSI detection".
+ */
+function autoMsiProductCodeRule(msi: MsiInfo): Record<string, unknown> {
+  return {
+    '@odata.type': '#microsoft.graph.win32LobAppProductCodeRule',
+    ruleType: 'detection',
+    productCode: msi.productCode,
+    productVersionOperator: 'notConfigured',
+    productVersion: null,
+  };
 }
 
 function parseIntuneWin(filePath: string): IntuneWinInfo {
@@ -116,6 +189,7 @@ function parseIntuneWin(filePath: string): IntuneWinInfo {
     mac: xmlValue(xml, 'Mac'),
     fileDigest: xmlValue(xml, 'FileDigest'),
     fileDigestAlgorithm: xmlValue(xml, 'FileDigestAlgorithm') || 'SHA256',
+    msi: parseMsiInfo(xml),
   };
 }
 
@@ -692,7 +766,9 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'Provide exactly one source: filePath (absolute path on the server, e.g. /data/myapp.intunewin), ' +
     'fileUrl (HTTP/HTTPS URL from which the server will download the file), ' +
     'or a OneDrive reference via oneDriveItemPath or oneDriveItemId (the server fetches the file from OneDrive via Graph). ' +
-    'After upload, set detection rules via update_intune_app and assign groups via assign_intune_app.',
+    'Intune API 2025-07-02 requires at least one detection rule at create time: ' +
+    'for MSI packages the tool auto-injects a ProductCode rule from the Detection.xml MsiInfo block when `rules` is omitted; ' +
+    'for EXE packages `rules` is required. After upload, assign groups via assign_intune_app.',
     {
       filePath: z.string().optional()
         .describe('Absolute path to the .intunewin file on the server, e.g. /data/myapp.intunewin'),
@@ -719,13 +795,34 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
         .describe('Minimum Windows 10/11 feature release, e.g. "1607" or "21H2"'),
       runAsAccount: z.enum(['system', 'user']).default('system'),
       deviceRestartBehavior: z.enum(['allow', 'basedOnReturnCode', 'suppress', 'force']).default('allow'),
+      maxRunTimeInMinutes: z.number().int().min(0).optional()
+        .describe('Install/uninstall time budget. Intune defaults to 60 when omitted.'),
+      displayVersion: z.string().optional()
+        .describe('Human-readable version string shown in the Intune portal'),
+      rules: z.array(win32LobAppRuleSchema).optional()
+        .describe(
+          'Detection/requirement rules sent at create time. ' +
+          'Omit for MSI packages to auto-inject a ProductCode detection rule from the .intunewin Detection.xml; ' +
+          'required for EXE packages.'
+        ),
+      returnCodes: z.array(z.object({
+        returnCode: z.number().int(),
+        type: z.enum(['failed', 'success', 'softReboot', 'hardReboot', 'retry']),
+      })).optional()
+        .describe(
+          'Return-code list (replaces the built-in defaults). ' +
+          'Defaults: 0/1707=success, 3010=softReboot, 1641=hardReboot, 1618=retry.'
+        ),
+      roleScopeTagIds: z.array(z.string()).optional()
+        .describe('Role scope tag ids to attach to the new app'),
     },
     async ({
       filePath, fileUrl, oneDriveUserId, oneDriveItemPath, oneDriveItemId,
       displayName, publisher, description,
       installCommandLine, uninstallCommandLine, setupFilePath,
       applicableArchitectures, minimumSupportedWindowsRelease,
-      runAsAccount, deviceRestartBehavior,
+      runAsAccount, deviceRestartBehavior, maxRunTimeInMinutes,
+      displayVersion, rules, returnCodes, roleScopeTagIds,
     }) => {
       const hasOneDrive = Boolean(oneDriveItemPath || oneDriveItemId);
       const sourceCount = [Boolean(filePath), Boolean(fileUrl), hasOneDrive].filter(Boolean).length;
@@ -755,31 +852,64 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
       }
       const info = parseIntuneWin(filePath!);
 
+      // Intune API 2025-07-02 rejects the POST when rules is empty. Auto-inject
+      // a ProductCode detection rule from the MSI metadata when the caller did
+      // not pass `rules`; fail fast for EXE packages so the operator gets a
+      // clear error instead of a Graph 400 "Win32LobApp must have at least one
+      // detection rule specified" with no app id to recover from.
+      let effectiveRules = rules;
+      if (!effectiveRules || effectiveRules.length === 0) {
+        if (info.msi) {
+          effectiveRules = [autoMsiProductCodeRule(info.msi)] as typeof effectiveRules;
+        } else {
+          // Fail-fast happens before the try/finally that cleans tmpPath.
+          // Unlink here so a downloaded .intunewin doesn't leak in /tmp.
+          if (tmpPath) fs.unlink(tmpPath, () => {});
+          throw new Error(
+            'No detection rules provided and package is not an MSI ' +
+            '(no <MsiInfo> block in Detection.xml). Pass `rules` (e.g. a ' +
+            'file system, registry or PowerShell detection rule) — Intune ' +
+            'rejects Win32 LOB creates without at least one detection rule.'
+          );
+        }
+      }
+
+      const effectiveReturnCodes = returnCodes ?? [
+        { returnCode: 0, type: 'success' },
+        { returnCode: 1707, type: 'success' },
+        { returnCode: 3010, type: 'softReboot' },
+        { returnCode: 1641, type: 'hardReboot' },
+        { returnCode: 1618, type: 'retry' },
+      ];
+
+      const installExperience: Record<string, unknown> = {
+        '@odata.type': '#microsoft.graph.win32LobAppInstallExperience',
+        runAsAccount,
+        deviceRestartBehavior,
+      };
+      if (maxRunTimeInMinutes !== undefined) {
+        installExperience.maxRunTimeInMinutes = maxRunTimeInMinutes;
+      }
+
       // ② Create Win32LobApp metadata entry
+      const msiInformation = msiInformationFromMsiInfo(info.msi);
       const app = await graph.post<{ id: string }>('/deviceAppManagement/mobileApps', {
         '@odata.type': '#microsoft.graph.win32LobApp',
         displayName,
         publisher,
         ...(description && { description }),
+        ...(displayVersion && { displayVersion }),
+        ...(roleScopeTagIds && { roleScopeTagIds }),
+        ...(msiInformation && { msiInformation }),
         fileName: info.fileName,
         installCommandLine,
         uninstallCommandLine,
         setupFilePath,
         applicableArchitectures,
         minimumSupportedWindowsRelease,
-        installExperience: {
-          '@odata.type': '#microsoft.graph.win32LobAppInstallExperience',
-          runAsAccount,
-          deviceRestartBehavior,
-        },
-        returnCodes: [
-          { returnCode: 0, type: 'success' },
-          { returnCode: 1707, type: 'success' },
-          { returnCode: 3010, type: 'softReboot' },
-          { returnCode: 1641, type: 'hardReboot' },
-          { returnCode: 1618, type: 'retry' },
-        ],
-        rules: [],
+        installExperience,
+        returnCodes: effectiveReturnCodes,
+        rules: effectiveRules,
       });
 
       try {
@@ -814,7 +944,9 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
               appId: app.id,
               contentVersionId: versionId,
               fileName: info.fileName,
-              message: `"${displayName}" uploaded. Next: set detection rules via update_intune_app, then assign groups via assign_intune_app.`,
+              detectionRulesCount: effectiveRules.length,
+              autoDetectedFromMsi: info.msi !== null && !rules,
+              message: `"${displayName}" uploaded. Next: assign groups via assign_intune_app.`,
             }, null, 2),
           }],
         };
@@ -833,7 +965,9 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
     'Replace the package content of an existing Intune Win32 LOB app with a new ' +
     '.intunewin. Creates a new contentVersion on the existing app, uploads the ' +
     'encrypted content (encryption info is taken from the .intunewin Detection.xml), ' +
-    'commits it, and patches committedContentVersion. ' +
+    'commits it, and patches committedContentVersion, fileName, and msiInformation ' +
+    '(refreshed from the new .intunewin so the Intune portal does not keep ' +
+    'showing stale productCode/productVersion). ' +
     'Provide exactly one source: filePath (absolute path on the server), fileUrl ' +
     '(HTTP/HTTPS URL the server downloads), or a OneDrive reference ' +
     '(oneDriveItemPath or oneDriveItemId, optionally with oneDriveUserId — defaults to "me").',
@@ -919,10 +1053,19 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
           },
         );
 
-        await graph.patch(`/deviceAppManagement/mobileApps/${encodeId(appId)}`, {
+        // Refresh msiInformation + fileName alongside committedContentVersion.
+        // Without this, the Intune portal keeps displaying the previously
+        // uploaded MSI metadata (productCode/productVersion) and original
+        // file name even though the actual content version has rolled forward.
+        const refreshedMsiInformation = msiInformationFromMsiInfo(info.msi);
+        const patchBody: Record<string, unknown> = {
           '@odata.type': '#microsoft.graph.win32LobApp',
           committedContentVersion: versionId,
-        });
+          fileName: info.fileName,
+        };
+        if (refreshedMsiInformation) patchBody.msiInformation = refreshedMsiInformation;
+
+        await graph.patch(`/deviceAppManagement/mobileApps/${encodeId(appId)}`, patchBody);
 
         return {
           content: [{
@@ -933,6 +1076,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
               committedContentVersion: versionId,
               fileName: info.fileName,
               sizeBytes: info.unencryptedSize,
+              msiInformationRefreshed: refreshedMsiInformation !== undefined,
               message: `Win32 LOB app content updated to contentVersion ${versionId}.`,
             }, null, 2),
           }],
