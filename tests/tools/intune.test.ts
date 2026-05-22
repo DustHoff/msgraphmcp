@@ -77,6 +77,7 @@ describe('Intune Tools', () => {
 
   const EXPECTED_TOOLS = [
     'list_intune_apps', 'get_intune_app', 'create_intune_web_app', 'create_intune_store_app',
+    'create_intune_winget_app',
     'update_intune_app', 'delete_intune_app', 'list_intune_app_assignments',
     'assign_intune_app', 'get_intune_app_install_status',
     'list_device_configurations', 'get_device_configuration', 'create_device_configuration',
@@ -167,6 +168,41 @@ describe('Intune Tools', () => {
       });
       const [, body] = args(graph.post);
       expect(body['@odata.type']).toBe('#microsoft.graph.androidStoreApp');
+    });
+  });
+
+  describe('create_intune_winget_app', () => {
+    it('posts winGetApp to the beta endpoint with packageIdentifier and default runAsAccount', async () => {
+      graph.beta.post.mockResolvedValue({ id: 'app4' });
+      await server.call('create_intune_winget_app', {
+        displayName: 'Microsoft To Do',
+        publisher: 'Microsoft',
+        packageIdentifier: '9NBLGGH5R558',
+      });
+      const [url, body] = args(graph.beta.post);
+      expect(url).toBe('/deviceAppManagement/mobileApps');
+      expect(body['@odata.type']).toBe('#microsoft.graph.winGetApp');
+      expect(body.packageIdentifier).toBe('9NBLGGH5R558');
+      expect(body.installExperience['@odata.type']).toBe('#microsoft.graph.winGetAppInstallExperience');
+      expect(body.installExperience.runAsAccount).toBe('system');
+      // winGetApp must not go to the v1.0 endpoint
+      expect(graph.post).not.toHaveBeenCalled();
+    });
+
+    it('honours an explicit runAsAccount and optional metadata', async () => {
+      graph.beta.post.mockResolvedValue({ id: 'app5' });
+      await server.call('create_intune_winget_app', {
+        displayName: 'Microsoft To Do',
+        publisher: 'Microsoft',
+        packageIdentifier: '9NBLGGH5R558',
+        runAsAccount: 'user',
+        description: 'Task management',
+        roleScopeTagIds: ['0'],
+      });
+      const [, body] = args(graph.beta.post);
+      expect(body.installExperience.runAsAccount).toBe('user');
+      expect(body.description).toBe('Task management');
+      expect(body.roleScopeTagIds).toEqual(['0']);
     });
   });
 

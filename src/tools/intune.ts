@@ -636,12 +636,14 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
 
   server.tool(
     'create_intune_store_app',
-    'Add a store app to Intune (Windows Store, iOS App Store, Google Play).',
+    'Add a store app to Intune (iOS App Store, Google Play). ' +
+    'NOTE: "windowsStore" maps to the legacy #microsoft.graph.windowsStoreApp type, which Graph now ' +
+    'rejects — use create_intune_winget_app for current Windows Store apps.',
     {
       displayName: z.string(),
       publisher: z.string(),
       storeType: z.enum(['windowsStore', 'iosStore', 'androidStore'])
-        .describe('App store platform'),
+        .describe('App store platform. "windowsStore" is deprecated (rejected by Graph); use create_intune_winget_app instead.'),
       appStoreUrl: z.string().url().describe('Store URL for the app'),
       description: z.string().optional(),
       bundleId: z.string().optional().describe('Bundle id (iOS) or package name (Android)'),
@@ -665,6 +667,54 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
       if (minimumSupportedOperatingSystem) body.minimumSupportedOperatingSystem = minimumSupportedOperatingSystem;
 
       const app = await graph.post('/deviceAppManagement/mobileApps', body);
+      return { content: [{ type: 'text', text: JSON.stringify(app, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'create_intune_winget_app',
+    'Add a "Microsoft Store app (new)" to Intune (#microsoft.graph.winGetApp). ' +
+    'Use this for current Windows Store apps — the legacy windowsStoreApp type used by ' +
+    'create_intune_store_app is deprecated and rejected by Graph. ' +
+    'packageIdentifier is the Microsoft Store product id, e.g. "9NBLGGH5R558" for Microsoft To Do.',
+    {
+      displayName: z.string(),
+      publisher: z.string(),
+      packageIdentifier: z.string()
+        .describe('Microsoft Store package identifier, e.g. "9NBLGGH5R558" (the id in apps.microsoft.com/detail/<id>).'),
+      runAsAccount: z.enum(['system', 'user']).default('system')
+        .describe('Install context: "system" installs for all users (default), "user" for the current user only.'),
+      description: z.string().optional(),
+      informationUrl: z.string().url().optional(),
+      privacyInformationUrl: z.string().url().optional(),
+      isFeatured: z.boolean().optional()
+        .describe('Mark the app as featured in the Company Portal'),
+      roleScopeTagIds: z.array(z.string()).optional()
+        .describe('Role scope tag ids assigned to the app'),
+      manifestHash: z.string().optional()
+        .describe('Optional hash of package metadata used to validate the app against the WinGet source repository.'),
+    },
+    async ({ displayName, publisher, packageIdentifier, runAsAccount, description,
+             informationUrl, privacyInformationUrl, isFeatured, roleScopeTagIds, manifestHash }) => {
+      const body: Record<string, unknown> = {
+        '@odata.type': '#microsoft.graph.winGetApp',
+        displayName,
+        publisher,
+        packageIdentifier,
+        installExperience: {
+          '@odata.type': '#microsoft.graph.winGetAppInstallExperience',
+          runAsAccount,
+        },
+      };
+      if (description) body.description = description;
+      if (informationUrl) body.informationUrl = informationUrl;
+      if (privacyInformationUrl) body.privacyInformationUrl = privacyInformationUrl;
+      if (isFeatured !== undefined) body.isFeatured = isFeatured;
+      if (roleScopeTagIds) body.roleScopeTagIds = roleScopeTagIds;
+      if (manifestHash) body.manifestHash = manifestHash;
+
+      // winGetApp is documented under the beta endpoint only.
+      const app = await graph.beta.post('/deviceAppManagement/mobileApps', body);
       return { content: [{ type: 'text', text: JSON.stringify(app, null, 2) }] };
     }
   );
