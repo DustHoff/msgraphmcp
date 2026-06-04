@@ -1,5 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { GraphClient } from '../graph/GraphClient';
+import { guardToolOutput } from './untrusted';
 import { registerAuthTools } from './auth';
 import { registerUserTools } from './users';
 import { registerMailTools } from './mail';
@@ -13,6 +14,10 @@ import { registerSiteTools } from './sites';
 import { registerIntuneTools } from './intune';
 
 export function registerAllTools(server: McpServer, graph: GraphClient): void {
+  // Wrap all tool text output in an untrusted-data envelope (audit PROMPT-1).
+  // Must run before tools are registered so every handler is guarded.
+  guardToolOutput(server);
+
   registerAuthTools(server, graph);
   registerUserTools(server, graph);
   registerMailTools(server, graph);

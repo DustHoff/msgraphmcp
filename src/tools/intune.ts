@@ -16,6 +16,13 @@ import { logger } from '../logger';
 // an attacker (or misconfigured URL) draining the /tmp filesystem.
 const MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB — large LOB apps fit
 
+// Per-entry uncompressed-size cap for archive entries we expand into memory.
+// Guards against decompression bombs — a tiny compressed entry that inflates to
+// gigabytes and OOM-kills the pod (audit ZIP-2). The content entry may legitimately
+// be large, so it shares the download cap; metadata/manifest entries are tiny.
+const MAX_UNCOMPRESSED_ENTRY_BYTES = MAX_DOWNLOAD_BYTES;
+const MAX_MANIFEST_BYTES = 16 * 1024 * 1024; // 16 MB — Detection.xml / AppxManifest.xml
+
 /**
  * SSRF guard: reject URLs that target the host loopback, link-local metadata
  * services (e.g. 169.254.169.254), or private RFC1918 ranges. Only http/https
@@ -172,12 +179,18 @@ function parseIntuneWin(filePath: string): IntuneWinInfo {
 
   const detectionEntry = zip.getEntry('IntuneWinPackage/Metadata/Detection.xml');
   if (!detectionEntry) throw new Error('.intunewin missing IntuneWinPackage/Metadata/Detection.xml');
+  if ((detectionEntry.header?.size ?? 0) > MAX_MANIFEST_BYTES) {
+    throw new Error('.intunewin Detection.xml is implausibly large; refusing to expand (possible decompression bomb)');
+  }
   const xml = detectionEntry.getData().toString('utf8');
 
   const contentEntry = zip.getEntries().find(
     e => e.entryName.startsWith('IntuneWinPackage/Contents/') && e.entryName.endsWith('.intunewin'),
   );
   if (!contentEntry) throw new Error('.intunewin missing encrypted content in IntuneWinPackage/Contents/');
+  if ((contentEntry.header?.size ?? 0) > MAX_UNCOMPRESSED_ENTRY_BYTES) {
+    throw new Error('.intunewin encrypted content exceeds the size limit; refusing to expand');
+  }
 
   return {
     fileName: xmlValue(xml, 'FileName'),
@@ -215,6 +228,22 @@ async function downloadToTempFile(url: string): Promise<string> {
     maxContentLength: MAX_DOWNLOAD_BYTES,
     signal: abortCtrl.signal,
     timeout: 60_000, // connection/initial-response timeout
+    // Re-validate every redirect hop. axios only ran the SSRF guard on the first
+    // URL; without this a public origin could 302 → 169.254.169.254 / internal
+    // hosts and the guard would be bypassed (audit SSRF-1). Throwing here aborts
+    // the request before the redirect is followed.
+    beforeRedirect: (options: {
+      protocol?: string;
+      host?: string;
+      hostname?: string;
+      path?: string;
+      href?: string;
+    }) => {
+      const target =
+        options.href ??
+        `${options.protocol ?? 'https:'}//${options.host ?? options.hostname ?? ''}${options.path ?? ''}`;
+      assertSafeDownloadUrl(target);
+    },
   });
   logger.info('download: response received', { status: response.status });
   resetStall();
@@ -372,7 +401,19 @@ function readMsixAppxManifestBase64FromFile(msixPath: string): Promise<string> {
             return reject(rsErr ?? new Error('yauzl: no read stream for AppxManifest.xml'));
           }
           const chunks: Buffer[] = [];
-          readStream.on('data', (c: Buffer) => chunks.push(c));
+          let total = 0;
+          readStream.on('data', (c: Buffer) => {
+            total += c.length;
+            if (total > MAX_MANIFEST_BYTES) {
+              // Decompression-bomb guard: a malformed MSIX could inflate AppxManifest.xml
+              // to exhaust memory. Abort once the buffered size crosses the cap (audit ZIP-2).
+              readStream.destroy();
+              zipfile.close();
+              reject(new Error('AppxManifest.xml exceeds the size limit; refusing to buffer'));
+              return;
+            }
+            chunks.push(c);
+          });
           readStream.on('end', () => {
             zipfile.close();
             resolve(Buffer.concat(chunks).toString('base64'));

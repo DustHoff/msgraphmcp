@@ -8,6 +8,7 @@ resources:
   - deployment.yaml
   - service.yaml
   - ingress.yaml
+  - networkpolicy.yaml
 
 # Override the image tag for a specific release:
 # images:

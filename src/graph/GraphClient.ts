@@ -1,5 +1,6 @@
 import axios, { AxiosInstance, AxiosRequestConfig, AxiosResponse, InternalAxiosRequestConfig } from 'axios';
 import { TokenManager, AuthRequiredError } from '../auth/TokenManager';
+import { redactSensitive } from './redact';
 import { logger } from '../logger';
 
 const GRAPH_BASE = 'https://graph.microsoft.com/v1.0';
@@ -9,29 +10,6 @@ const DEBUG = process.env.GRAPH_DEBUG !== 'false';
 
 // Relevant MS Graph response headers for diagnostics
 const DEBUG_RESPONSE_HEADERS = ['request-id', 'client-request-id', 'x-ms-ags-diagnostic', 'odata-version'];
-
-// Keys whose values must never appear in debug logs — credentials, tokens,
-// secrets, private keys, etc. Match is case-insensitive and substring-based
-// so we catch nested fields like `passwordProfile.password`, `clientSecret`,
-// `accessToken`, `refreshToken`, `privateKey`, etc.
-const SENSITIVE_KEY_PATTERN = /password|secret|token|credential|private[-_]?key|apikey|api[-_]key/i;
-const REDACTED = '***REDACTED***';
-
-function redactSensitive(value: unknown): unknown {
-  if (value === null || value === undefined) return value;
-  if (Array.isArray(value)) return value.map(redactSensitive);
-  if (typeof value !== 'object') return value;
-
-  const out: Record<string, unknown> = {};
-  for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
-    if (SENSITIVE_KEY_PATTERN.test(key)) {
-      out[key] = typeof val === 'string' || typeof val === 'number' ? REDACTED : redactSensitive(val);
-    } else {
-      out[key] = redactSensitive(val);
-    }
-  }
-  return out;
-}
 
 interface TimedRequestConfig extends InternalAxiosRequestConfig {
   _startMs?: number;
@@ -79,7 +57,7 @@ function createAxiosInstance(
         user: config._user,
         method: config.method?.toUpperCase(),
         url: config.url,
-        ...(config.params && { params: config.params }),
+        ...(config.params && { params: redactSensitive(config.params) }),
         ...(config.data !== undefined && { body: redactSensitive(config.data) }),
       });
     }

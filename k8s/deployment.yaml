@@ -17,6 +17,11 @@ spec:
         app.kubernetes.io/name: msgraphmcp
         app.kubernetes.io/version: "1.0.0"
     spec:
+      # The app never talks to the Kubernetes API, so it needs no ServiceAccount
+      # token. Dropping it removes a lateral-movement pivot if the pod is compromised
+      # (audit SA-1).
+      automountServiceAccountToken: false
+
       # ── ARM64 node placement ──────────────────────────────────────────────
       nodeSelector:
         kubernetes.io/arch: arm64
@@ -38,6 +43,9 @@ spec:
         runAsUser: 1000        # matches the `node` user in node:20-alpine
         runAsGroup: 1000
         fsGroup: 1000
+        # Apply the container runtime's default seccomp profile (audit SECCTX-1).
+        seccompProfile:
+          type: RuntimeDefault
 
       containers:
         - name: msgraphmcp
@@ -63,6 +71,10 @@ spec:
               value: warn
             - name: GRAPH_DEBUG
               value: "false"
+            # Behind nginx-ingress, key the per-IP rate limiter on the real client
+            # IP from X-Forwarded-For instead of the ingress pod IP (audit DOS-1).
+            - name: TRUST_PROXY
+              value: "true"
             # Azure credentials from Secret
             - name: AZURE_CLIENT_ID
               valueFrom:
@@ -106,6 +118,11 @@ spec:
           volumeMounts:
             - name: token-cache
               mountPath: /data
+            # Writable scratch for Intune package downloads (os.tmpdir()), so the
+            # root filesystem can stay read-only (audit ROOTFS-1). Must be large
+            # enough for the biggest LOB package you upload (download cap is 2 GB).
+            - name: tmp
+              mountPath: /tmp
             # Uncomment for Option B (client certificate):
             # - name: client-cert
             #   mountPath: /mnt/cert
@@ -115,9 +132,11 @@ spec:
             requests:
               cpu: 50m
               memory: 128Mi
+              ephemeral-storage: 256Mi
             limits:
               cpu: 500m
               memory: 512Mi
+              ephemeral-storage: 4Gi
 
           # ── Probes ─────────────────────────────────────────────────────────
           # start-period covers the one-time device-code authentication flow
@@ -148,7 +167,9 @@ spec:
 
           securityContext:
             allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: false  # false because npm writes to node_modules at runtime
+            # Root filesystem is read-only; the app only writes to the /data PVC
+            # (token cache) and the /tmp emptyDir (downloads) (audit ROOTFS-1).
+            readOnlyRootFilesystem: true
             capabilities:
               drop:
                 - ALL
@@ -157,6 +178,9 @@ spec:
         - name: token-cache
           persistentVolumeClaim:
             claimName: msgraphmcp-token-cache
+        - name: tmp
+          emptyDir:
+            sizeLimit: 4Gi
         # Uncomment for Option B (client certificate).
         # Create a Kubernetes Secret named "msgraphmcp-client-cert" containing
         # the PEM private key under the key "tls.key", then uncomment below:
