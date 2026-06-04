@@ -235,7 +235,11 @@ Restart Claude Code after editing the config — the server appears in the MCP t
 | `GRAPH_SCOPES` | No | all scopes | Space-separated delegated scopes (used in auth code and device code modes) |
 | `TOKEN_CACHE_PATH` | No | `/data/tokens.json` | Path to the MSAL token cache file |
 | `PORT` | No | — | When set, the server listens on HTTP (Kubernetes mode); otherwise uses stdio |
-| `LOG_LEVEL` | No | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
+| `MCP_AUTH_TOKEN` | HTTP: **Yes** | — | Bearer token required on every `/mcp` request. The MCP client (Claude Code) must send it as `Authorization: Bearer <token>`. Generate with `openssl rand -hex 32`. Without it the server **refuses to start** in HTTP mode (see `MCP_ALLOW_UNAUTHENTICATED`). |
+| `MCP_ALLOW_UNAUTHENTICATED` | No | `false` | Set to `true` to run `/mcp` without the `MCP_AUTH_TOKEN` gate. **Trusted, non-public networks only.** |
+| `MCP_ALLOW_INSECURE_AUTH_MODE` | No | `false` | Set to `true` to permit app-only / device-code auth over HTTP. **Trusted, non-public networks only** — these modes let any caller reach Graph (audit AUTH-1/AUTH-4). |
+| `GRAPH_DEBUG` | No | `true` | When not `false`, logs full Graph request/response bodies. **Set `false` in production** (audit LOG-1/LOG-2). |
+| `LOG_LEVEL` | No | `info` | Log verbosity: `debug`, `info`, `warn`, `error`. Use `warn` in production. |
 | `MAX_SESSIONS` | No | `50` | Maximum concurrent MCP sessions in HTTP mode. New connections beyond this limit receive HTTP 503. |
 | `SESSION_IDLE_TIMEOUT_MINUTES` | No | `60` | Minutes of inactivity before an MCP session is automatically closed and removed. |
 
@@ -252,6 +256,12 @@ Four modes are selected automatically by which environment variables are set:
 | **C — Client Certificate** | `AZURE_CLIENT_CERTIFICATE_PATH` + `THUMBPRINT` | App-only | No |
 | **D — Device Code** | none of the above | Delegated | Yes |
 
+> ⚠️ **HTTP / public exposure: only Mode A is permitted.** When `PORT` is set, the server
+> **refuses to start** in Mode B, C, or D — app-only modes hand any caller full app-identity
+> Graph access and device-code leaks the device code to logs (audit findings AUTH-1 / AUTH-4).
+> Modes B/C/D are for local **stdio** use only, or behind a trusted network with
+> `MCP_ALLOW_INSECURE_AUTH_MODE=true`.
+
 ### Mode A — Authorization Code + PKCE (delegated, recommended for HTTP/Kubernetes)
 
 Set `AZURE_CLIENT_SECRET` **and** `AZURE_REDIRECT_URI`. Each MCP session authenticates independently — tokens are isolated per session and kept in-memory. Suitable for containers with Entra ID Conditional Access — CA compliance is evaluated against the **user's browser device**, not the container. Multiple users can be authenticated simultaneously.
@@ -259,6 +269,31 @@ Set `AZURE_CLIENT_SECRET` **and** `AZURE_REDIRECT_URI`. Each MCP session authent
 **Prerequisites:**
 - Register `AZURE_REDIRECT_URI` (e.g. `https://msgraph.example.com/auth/callback`) as a **Web** redirect URI in the Entra ID app registration.
 - Grant **Delegated** permissions (not Application) + admin consent.
+
+#### Securing the `/mcp` endpoint (required for public exposure)
+
+For a public deployment the `/mcp` endpoint **must** be gated so that only authorized MCP
+clients can open a session or trigger a login URL. Without this, an attacker can mint a
+victim-bound login URL and ride a phished session (audit finding CSRF-1).
+
+Set `MCP_AUTH_TOKEN` to a high-entropy secret. Every `/mcp` request must then present it as
+`Authorization: Bearer <token>` (checked in constant time). The server **refuses to start** in
+HTTP mode unless `MCP_AUTH_TOKEN` is set (or `MCP_ALLOW_UNAUTHENTICATED=true` is explicitly
+opted in for a trusted network).
+
+```bash
+# Generate the token
+openssl rand -hex 32
+
+# Point Claude Code at the remote server with the bearer header
+claude mcp add --transport http msgraphmcp \
+    https://msgraph.example.com/mcp \
+    --header "Authorization: Bearer <token>"
+```
+
+Then drive the one-time browser login below to authenticate the session to Microsoft. TLS at
+the ingress is mandatory so the token and `mcp-session-id` are never sent in cleartext — see
+`k8s/ingress.yaml`.
 
 #### Authentication flow
 
@@ -324,7 +359,9 @@ Tokens are kept **in-memory** for the session's lifetime. They survive within a 
 
 #### Kubernetes deployment
 
-Uncomment the **Option A** block in `k8s/deployment.yaml` and set `AZURE_REDIRECT_URI` to your ingress hostname:
+`k8s/deployment.yaml` ships authorization-code mode **enabled by default**. Set `AZURE_REDIRECT_URI`
+to your ingress hostname and provide `AZURE_CLIENT_SECRET` + `MCP_AUTH_TOKEN` via the
+`msgraphmcp-azure` Secret (`k8s/secret.yaml`):
 
 ```yaml
 - name: AZURE_CLIENT_SECRET
@@ -334,6 +371,11 @@ Uncomment the **Option A** block in `k8s/deployment.yaml` and set `AZURE_REDIREC
       key: AZURE_CLIENT_SECRET
 - name: AZURE_REDIRECT_URI
   value: https://msgraph.example.com/auth/callback
+- name: MCP_AUTH_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: msgraphmcp-azure
+      key: MCP_AUTH_TOKEN
 ```
 
 ### Mode B — Client Secret (app-only)

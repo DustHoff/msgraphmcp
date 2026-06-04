@@ -7,6 +7,12 @@ import { TokenManager, AuthRequiredError } from './auth/TokenManager';
 import { GraphClient } from './graph/GraphClient';
 import { registerAllTools } from './tools/index';
 import { escapeHtml } from './tools/shared';
+import {
+  resolveHttpSecurityPolicy,
+  isAuthorizedMcpRequest,
+  HttpSecurityError,
+  HttpSecurityPolicy,
+} from './http/security';
 import { logger } from './logger';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -89,10 +95,19 @@ const MAX_SESSIONS = parseInt(process.env.MAX_SESSIONS ?? '50', 10);
 const SESSION_IDLE_TIMEOUT_MS =
   parseInt(process.env.SESSION_IDLE_TIMEOUT_MINUTES ?? '60', 10) * 60 * 1000;
 
-async function startHttp(port: number): Promise<void> {
+async function startHttp(port: number, security: HttpSecurityPolicy): Promise<void> {
   // Map of active sessions: sessionId → { transport, tokenManager, graphClient }
   // Each session gets its own isolated token — no token bleed between users.
   const sessions = new Map<string, SessionData>();
+
+  // Surface any non-fatal security warnings resolved at startup.
+  for (const warning of security.warnings) {
+    logger.warn('security: ' + warning);
+  }
+  logger.info('mcp endpoint auth gate', {
+    enabled: security.gatingEnabled,
+    authMode: security.authMode,
+  });
 
   const isAuthCodeMode = Boolean(process.env.AZURE_REDIRECT_URI && process.env.AZURE_CLIENT_SECRET);
   const REDIRECT_URI = process.env.AZURE_REDIRECT_URI ?? '';
@@ -315,6 +330,26 @@ async function startHttp(port: number): Promise<void> {
       return;
     }
 
+    // ── Inbound auth gate ─────────────────────────────────────────────────────
+    // Only MCP clients presenting the configured bearer token may open a session,
+    // enumerate tools, or trigger a login URL. This blocks anonymous session
+    // creation — closing app-only abuse (AUTH-1) and login-CSRF/session-fixation
+    // (CSRF-1), since an attacker who cannot reach /mcp cannot mint a victim-bound
+    // login URL. The token check runs in constant time. When MCP_AUTH_TOKEN is
+    // unset (explicit MCP_ALLOW_UNAUTHENTICATED opt-in) the gate is a no-op.
+    if (!isAuthorizedMcpRequest(req.headers['authorization'], security.mcpAuthToken)) {
+      logger.warn('mcp: rejected unauthorized request', {
+        method: req.method,
+        remoteAddress: req.socket.remoteAddress,
+      });
+      res.writeHead(401, {
+        'Content-Type': 'application/json',
+        'WWW-Authenticate': 'Bearer realm="msgraphmcp"',
+      });
+      res.end(JSON.stringify({ error: 'Unauthorized', message: 'Missing or invalid bearer token.' }));
+      return;
+    }
+
     const incomingSessionId = req.headers['mcp-session-id'] as string | undefined;
     try {
       const existingSession = incomingSessionId ? sessions.get(incomingSessionId) : undefined;
@@ -484,7 +519,21 @@ async function main(): Promise<void> {
       process.stderr.write(`ERROR: PORT must be a valid port number, got: ${portEnv}\n`);
       process.exit(1);
     }
-    await startHttp(port);
+
+    // Validate the HTTP-mode security configuration and fail closed on insecure
+    // setups (app-only/device-code over HTTP, or no inbound auth gate).
+    let security: HttpSecurityPolicy;
+    try {
+      security = resolveHttpSecurityPolicy(process.env);
+    } catch (err) {
+      if (err instanceof HttpSecurityError) {
+        process.stderr.write(`\nERROR: ${err.message}\n`);
+        process.exit(1);
+      }
+      throw err;
+    }
+
+    await startHttp(port, security);
   } else {
     const tokenManager = new TokenManager();
     const graphClient = new GraphClient(tokenManager);
