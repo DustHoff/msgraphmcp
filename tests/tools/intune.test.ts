@@ -231,6 +231,96 @@ describe('Intune Tools', () => {
     });
   });
 
+  describe('get_intune_app', () => {
+    it('reads through the beta endpoint so Win32-only fields are returned', async () => {
+      graph.beta.get.mockResolvedValue({ id: 'app1', allowAvailableUninstall: true });
+      await server.call('get_intune_app', { appId: 'app1' });
+      expect(graph.beta.get).toHaveBeenCalledWith(
+        '/deviceAppManagement/mobileApps/app1', undefined,
+      );
+      expect(graph.get).not.toHaveBeenCalled();
+    });
+
+    it('casts Win32-derived $select tokens to the win32LobApp type cast', async () => {
+      graph.beta.get.mockResolvedValue({ id: 'app1' });
+      await server.call('get_intune_app', {
+        appId: 'app1', select: 'id,displayName,allowAvailableUninstall,displayVersion',
+      });
+      const [, params] = args(graph.beta.get);
+      // base fields stay bare; win32-derived fields gain the cast prefix
+      expect(params.$select).toBe(
+        'id,displayName,' +
+        'microsoft.graph.win32LobApp/allowAvailableUninstall,' +
+        'microsoft.graph.win32LobApp/displayVersion',
+      );
+    });
+
+    it('leaves an already-cast select token untouched', async () => {
+      graph.beta.get.mockResolvedValue({ id: 'app1' });
+      await server.call('get_intune_app', {
+        appId: 'app1', select: 'microsoft.graph.win32LobApp/allowAvailableUninstall',
+      });
+      const [, params] = args(graph.beta.get);
+      expect(params.$select).toBe('microsoft.graph.win32LobApp/allowAvailableUninstall');
+    });
+  });
+
+  describe('update_intune_app', () => {
+    it('accepts allowAvailableUninstall and routes the PATCH through beta', async () => {
+      graph.beta.patch.mockResolvedValue(undefined);
+      await server.call('update_intune_app', {
+        appId: 'app1', allowAvailableUninstall: true,
+      });
+      const [url, body] = args(graph.beta.patch);
+      expect(url).toBe('/deviceAppManagement/mobileApps/app1');
+      expect(body.allowAvailableUninstall).toBe(true);
+      expect(body['@odata.type']).toBe('#microsoft.graph.win32LobApp');
+      expect(graph.patch).not.toHaveBeenCalled();
+    });
+
+    it('routes displayVersion updates through beta (v1.0 drops it)', async () => {
+      graph.beta.patch.mockResolvedValue(undefined);
+      await server.call('update_intune_app', { appId: 'app1', displayVersion: '1.2.3' });
+      const [, body] = args(graph.beta.patch);
+      expect(body.displayVersion).toBe('1.2.3');
+      expect(graph.patch).not.toHaveBeenCalled();
+    });
+
+    it('routes installExperience.maxRunTimeInMinutes updates through beta', async () => {
+      graph.beta.patch.mockResolvedValue(undefined);
+      await server.call('update_intune_app', {
+        appId: 'app1', installExperience: { maxRunTimeInMinutes: 90 },
+      });
+      expect(graph.beta.patch).toHaveBeenCalled();
+      expect(graph.patch).not.toHaveBeenCalled();
+    });
+
+    it('keeps v1.0-only Win32 updates on the v1.0 endpoint', async () => {
+      graph.patch.mockResolvedValue(undefined);
+      await server.call('update_intune_app', { appId: 'app1', setupFilePath: 'setup.exe' });
+      const [url, body] = args(graph.patch);
+      expect(url).toBe('/deviceAppManagement/mobileApps/app1');
+      expect(body['@odata.type']).toBe('#microsoft.graph.win32LobApp');
+      expect(graph.beta.patch).not.toHaveBeenCalled();
+    });
+
+    it('keeps common-only updates on v1.0 without an @odata.type marker', async () => {
+      graph.patch.mockResolvedValue(undefined);
+      await server.call('update_intune_app', { appId: 'app1', displayName: 'New name' });
+      const [, body] = args(graph.patch);
+      expect(body.displayName).toBe('New name');
+      expect(body['@odata.type']).toBeUndefined();
+      expect(graph.beta.patch).not.toHaveBeenCalled();
+    });
+
+    it('reports nothing-to-update when no fields are supplied', async () => {
+      const result = await server.call('update_intune_app', { appId: 'app1' });
+      expect(result.content[0].text).toMatch(/nothing to update/i);
+      expect(graph.patch).not.toHaveBeenCalled();
+      expect(graph.beta.patch).not.toHaveBeenCalled();
+    });
+  });
+
   // ── Device configuration tests ────────────────────────────────────────────
 
   describe('create_device_configuration', () => {
@@ -633,9 +723,9 @@ describe('Intune Tools', () => {
 
   describe('URL-encoding of opaque ids', () => {
     it('encodes appId in mobileApps path', async () => {
-      graph.get.mockResolvedValue({ id: 'a/1' });
+      graph.beta.get.mockResolvedValue({ id: 'a/1' });
       await server.call('get_intune_app', { appId: 'a/1' });
-      const [url] = args(graph.get);
+      const [url] = args(graph.beta.get);
       expect(url).toBe('/deviceAppManagement/mobileApps/a%2F1');
     });
 
