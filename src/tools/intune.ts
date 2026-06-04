@@ -173,6 +173,53 @@ function autoMsiProductCodeRule(msi: MsiInfo): Record<string, unknown> {
   };
 }
 
+// ─── Win32 derived-type addressing (v1.0 vs beta) ───────────────────────────
+// `microsoft.graph.win32LobApp` properties such as `allowAvailableUninstall`,
+// `displayVersion` and `installExperience.maxRunTimeInMinutes` exist ONLY on the
+// beta model — the v1.0 win32LobApp type does not declare them, so v1.0 silently
+// drops them on PATCH and omits them on GET. Reads/writes touching these fields
+// must therefore go through the /beta endpoint.
+const WIN32_CAST = 'microsoft.graph.win32LobApp';
+
+// Beta-only win32LobApp fields. Presence of any of these in an update body forces
+// the PATCH onto the beta endpoint so the value actually persists.
+const BETA_ONLY_WIN32_FIELDS = ['allowAvailableUninstall', 'displayVersion'] as const;
+
+function updateNeedsBetaEndpoint(body: Record<string, unknown>): boolean {
+  if (BETA_ONLY_WIN32_FIELDS.some((k) => k in body)) return true;
+  const ie = body.installExperience;
+  return !!ie && typeof ie === 'object' && 'maxRunTimeInMinutes' in (ie as object);
+}
+
+// win32LobApp-derived properties that are not declared on the base mobileApp /
+// mobileLobApp types. A bare `$select` of one of these against the mobileApps
+// collection 400s ("Could not find a property named '…' on type
+// 'microsoft.graph.mobileApp'"); each must be addressed via the type cast,
+// e.g. `microsoft.graph.win32LobApp/allowAvailableUninstall`.
+const WIN32_DERIVED_SELECT_FIELDS = new Set([
+  'installCommandLine', 'uninstallCommandLine', 'setupFilePath',
+  'applicableArchitectures', 'allowedArchitectures', 'minimumSupportedWindowsRelease',
+  'minimumFreeDiskSpaceInMB', 'minimumMemoryInMB', 'minimumNumberOfProcessors',
+  'minimumCpuSpeedInMHz', 'displayVersion', 'allowAvailableUninstall',
+  'installExperience', 'returnCodes', 'rules', 'msiInformation',
+  'minimumSupportedOperatingSystem',
+]);
+
+/**
+ * Rewrite a comma-separated `$select` so that win32-derived tokens carry the
+ * `microsoft.graph.win32LobApp/` cast. Base mobileApp tokens (id, displayName, …)
+ * and tokens already carrying a cast are passed through untouched.
+ */
+function castWin32Select(select: string): string {
+  return select
+    .split(',')
+    .map((raw) => {
+      const field = raw.trim();
+      return WIN32_DERIVED_SELECT_FIELDS.has(field) ? `${WIN32_CAST}/${field}` : field;
+    })
+    .join(',');
+}
+
 function parseIntuneWin(filePath: string): IntuneWinInfo {
   if (!fs.existsSync(filePath)) throw new Error(`File not found: ${filePath}`);
   const zip = new AdmZip(filePath);
@@ -637,15 +684,22 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
 
   server.tool(
     'get_intune_app',
-    'Get a specific Intune managed app by id.',
+    'Get a specific Intune managed app by id. Reads via the /beta endpoint so that ' +
+    'Win32-only fields (allowAvailableUninstall, displayVersion, installExperience.maxRunTimeInMinutes) ' +
+    'are returned — the v1.0 model omits them. A `select` that names Win32-derived properties is ' +
+    'automatically cast to microsoft.graph.win32LobApp/<prop>.',
     {
       appId: z.string(),
-      select: z.string().optional(),
+      select: z.string().optional()
+        .describe('Comma-separated fields. Win32-derived fields are auto-cast, ' +
+          "e.g. 'id,allowAvailableUninstall' works without a manual type cast."),
     },
     async ({ appId, select }) => {
-      const app = await graph.get(
+      // Read through beta: allowAvailableUninstall/displayVersion exist only on the
+      // beta win32LobApp model and are absent from a v1.0 GET even without $select.
+      const app = await graph.beta.get(
         `/deviceAppManagement/mobileApps/${encodeId(appId)}`,
-        select ? { $select: select } : undefined
+        select ? { $select: castWin32Select(select) } : undefined
       );
       return { content: [{ type: 'text', text: JSON.stringify(app, null, 2) }] };
     }
@@ -816,6 +870,10 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
         .describe('Win32: return-code list (replaces existing). Common defaults: 0/1707=success, 3010=softReboot, 1641=hardReboot, 1618=retry.'),
       rules: z.array(win32LobAppRuleSchema).optional()
         .describe('Win32: detection/requirement rules (replaces existing). Graph API field name is "rules".'),
+      allowAvailableUninstall: z.boolean().optional()
+        .describe('Win32: when true, the Company Portal shows an "Uninstall" button for an app deployed ' +
+          'with an "Available" assignment (default false since Intune 2307). Beta-only field — the update ' +
+          'is routed to the /beta endpoint so the value actually persists.'),
     },
     async ({ appId, ...props }) => {
       const win32OnlyFields = new Set([
@@ -824,6 +882,7 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
         'minimumSupportedWindowsRelease', 'minimumFreeDiskSpaceInMB',
         'minimumMemoryInMB', 'minimumNumberOfProcessors', 'minimumCpuSpeedInMHz',
         'displayVersion', 'installExperience', 'returnCodes', 'rules',
+        'allowAvailableUninstall',
       ]);
       const body: Record<string, unknown> = Object.fromEntries(
         Object.entries(props).filter(([, v]) => v !== undefined)
@@ -836,7 +895,12 @@ export function registerIntuneTools(server: McpServer, graph: GraphClient) {
         // Graph API requires @odata.type on the app body when patching win32LobApp-specific fields
         body['@odata.type'] = '#microsoft.graph.win32LobApp';
       }
-      await graph.patch(`/deviceAppManagement/mobileApps/${encodeId(appId)}`, body);
+      // Beta-only win32 fields (allowAvailableUninstall, displayVersion,
+      // installExperience.maxRunTimeInMinutes) are silently dropped by v1.0 — route
+      // those updates through beta. beta is a superset of the v1.0 win32LobApp model,
+      // so any co-submitted v1.0 fields persist there too.
+      const client = updateNeedsBetaEndpoint(body) ? graph.beta : graph;
+      await client.patch(`/deviceAppManagement/mobileApps/${encodeId(appId)}`, body);
       return { content: [{ type: 'text', text: `App ${appId} updated.` }] };
     }
   );
