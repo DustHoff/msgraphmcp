@@ -13,6 +13,7 @@ import {
   HttpSecurityError,
   HttpSecurityPolicy,
 } from './http/security';
+import { RateLimiter } from './http/rateLimiter';
 import { logger } from './logger';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -95,10 +96,37 @@ const MAX_SESSIONS = parseInt(process.env.MAX_SESSIONS ?? '50', 10);
 const SESSION_IDLE_TIMEOUT_MS =
   parseInt(process.env.SESSION_IDLE_TIMEOUT_MINUTES ?? '60', 10) * 60 * 1000;
 
+// Per-IP rate limit (audit DOS-1). Disabled when RATE_LIMIT_MAX=0.
+const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX ?? '600', 10);
+const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_SEC ?? '60', 10) * 1000;
+// When behind a trusted reverse proxy / ingress, key the limiter on the client IP
+// from X-Forwarded-For instead of the proxy's socket address. Only enable when the
+// proxy is trusted to set XFF — otherwise clients can spoof it.
+const TRUST_PROXY = process.env.TRUST_PROXY === 'true';
+
+function clientKey(req: IncomingMessage): string {
+  if (TRUST_PROXY) {
+    const xff = req.headers['x-forwarded-for'];
+    const first = (Array.isArray(xff) ? xff[0] : xff)?.split(',')[0]?.trim();
+    if (first) return first;
+  }
+  return req.socket.remoteAddress ?? 'unknown';
+}
+
 async function startHttp(port: number, security: HttpSecurityPolicy): Promise<void> {
   // Map of active sessions: sessionId → { transport, tokenManager, graphClient }
   // Each session gets its own isolated token — no token bleed between users.
   const sessions = new Map<string, SessionData>();
+
+  // Sessions reserved by an in-flight initialize but not yet inserted into the
+  // map. Counted alongside sessions.size so the MAX_SESSIONS admission decision is
+  // atomic across concurrent initialize bursts (audit RACE-1).
+  let pendingSessions = 0;
+
+  const rateLimiter =
+    RATE_LIMIT_MAX > 0
+      ? new RateLimiter({ windowMs: RATE_LIMIT_WINDOW_MS, max: RATE_LIMIT_MAX, maxKeys: 10_000 })
+      : undefined;
 
   // Surface any non-fatal security warnings resolved at startup.
   for (const warning of security.warnings) {
@@ -172,6 +200,19 @@ async function startHttp(port: number, security: HttpSecurityPolicy): Promise<vo
 
   const httpServer = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? '/', `http://localhost:${port}`);
+
+    // ── Per-IP rate limit ─────────────────────────────────────────────────────
+    // Applied to everything except the K8s probe path. Bounds unauthenticated
+    // floods (session creation, 401 spam) before any allocation (audit DOS-1).
+    if (rateLimiter && url.pathname !== '/health') {
+      const { allowed, retryAfterSec } = rateLimiter.take(clientKey(req), Date.now());
+      if (!allowed) {
+        logger.warn('rate limit exceeded', { path: url.pathname, remoteAddress: req.socket.remoteAddress });
+        res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': String(retryAfterSec) });
+        res.end(JSON.stringify({ error: 'Too Many Requests', message: 'Rate limit exceeded. Try again later.' }));
+        return;
+      }
+    }
 
     // ── Health/readiness probe ───────────────────────────────────────────────
     // Intentionally returns no session IDs, UPNs, or per-session detail —
@@ -268,8 +309,9 @@ async function startHttp(port: number, security: HttpSecurityPolicy): Promise<vo
         res.end();
       } catch (err) {
         logger.error('auth: failed to build auth URL', { error: String(err) });
+        // Generic client message — detail is logged server-side only (audit LOG-7).
         res.writeHead(500, { 'Content-Type': 'text/plain' });
-        res.end('Failed to initiate authentication: ' + String(err));
+        res.end('Failed to initiate authentication. Please try again.');
       }
       return;
     }
@@ -318,8 +360,9 @@ async function startHttp(port: number, security: HttpSecurityPolicy): Promise<vo
         res.end(successPage());
       } catch (err) {
         logger.error('auth: token exchange failed', { error: String(err) });
+        // Generic client message — detail is logged server-side only (audit LOG-7).
         res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(errorPage('Token exchange failed: ' + String(err)));
+        res.end(errorPage('Authentication failed. Please try signing in again.'));
       }
       return;
     }
@@ -351,6 +394,7 @@ async function startHttp(port: number, security: HttpSecurityPolicy): Promise<vo
     }
 
     const incomingSessionId = req.headers['mcp-session-id'] as string | undefined;
+    let reserved = false;
     try {
       const existingSession = incomingSessionId ? sessions.get(incomingSessionId) : undefined;
       let transport = existingSession?.transport;
@@ -365,12 +409,28 @@ async function startHttp(port: number, security: HttpSecurityPolicy): Promise<vo
       }
 
       if (!transport) {
-        if (sessions.size >= MAX_SESSIONS) {
-          logger.warn('mcp session limit reached', { limit: MAX_SESSIONS, active: sessions.size });
+        // ALLOC-1: only an `initialize` (POST) may create a session. A GET/DELETE
+        // with no known session id must not allocate a TokenManager + McpServer
+        // (≈140 tools) just to have the SDK reject it — an allocation-amplification
+        // DoS that escapes the session cap.
+        if (req.method !== 'POST') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Bad Request', message: 'A valid mcp-session-id header is required for this request.' }));
+          return;
+        }
+
+        // RACE-1: reserve the slot synchronously — there is no await between this
+        // check and the increment, so concurrent initialize bursts cannot all pass
+        // the gate and overshoot MAX_SESSIONS (the map insert happens later, during
+        // handleRequest). pendingSessions is released in the finally block.
+        if (sessions.size + pendingSessions >= MAX_SESSIONS) {
+          logger.warn('mcp session limit reached', { limit: MAX_SESSIONS, active: sessions.size, pending: pendingSessions });
           res.writeHead(503, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Service Unavailable', message: 'Maximum concurrent sessions reached. Try again later.' }));
           return;
         }
+        pendingSessions++;
+        reserved = true;
 
         // Each MCP session gets its own isolated TokenManager and GraphClient.
         // In auth-code mode this ensures tokens are never shared across users —
@@ -449,6 +509,10 @@ async function startHttp(port: number, security: HttpSecurityPolicy): Promise<vo
           res.end(JSON.stringify({ error: 'Internal Server Error' }));
         }
       }
+    } finally {
+      // Release any session slot reserved above (RACE-1). By now the session has
+      // either been inserted into the map (so it counts in sessions.size) or failed.
+      if (reserved) pendingSessions--;
     }
   });
 

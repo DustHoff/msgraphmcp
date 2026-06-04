@@ -1,0 +1,47 @@
+# Default-deny NetworkPolicy for msgraphmcp (audit NETPOL-1).
+#
+# Restricts pod ingress to the ingress controller and pod egress to DNS + HTTPS,
+# so a compromised pod cannot freely exfiltrate data or reach arbitrary hosts.
+#
+# Notes:
+#   - Egress is port-based (443/53). To pin egress to specific Microsoft hostnames
+#     (login.microsoftonline.com, graph.microsoft.com, *.sharepoint.com, …), use a
+#     CNI with FQDN policy support (e.g. Cilium CiliumNetworkPolicy).
+#   - If liveness/readiness probes fail after applying this, your CNI may route
+#     kubelet probes from the node — add an ingress rule allowing the node/host
+#     network to reach port 8080, or label the probe source accordingly.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: msgraphmcp
+  namespace: msgraphmcp
+  labels:
+    app.kubernetes.io/name: msgraphmcp
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: msgraphmcp
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # MCP traffic to :8080 from the ingress controller namespace only.
+    # Adjust the namespace label to match your ingress controller's namespace.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    # DNS resolution.
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # HTTPS to Microsoft Graph / Entra ID / SharePoint download hosts.
+    - ports:
+        - protocol: TCP
+          port: 443

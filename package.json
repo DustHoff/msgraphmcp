@@ -15,7 +15,7 @@
     "@azure/msal-node": "^2.16.2",
     "@modelcontextprotocol/sdk": "^1.10.2",
     "adm-zip": "^0.5.17",
-    "axios": "^1.7.9",
+    "axios": "^1.15.1",
     "yauzl": "^3.3.0",
     "zod": "^3.23.8"
   },

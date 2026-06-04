@@ -12,19 +12,23 @@ env:
   IMAGE_NAME: ${{ github.repository }}
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+# Actions are pinned to commit SHAs (audit CICD-1); the trailing comment records
+# the human-readable version. Update the SHA and comment together when bumping.
 jobs:
   test:
     name: Tests (gate)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: "20"
           cache: "npm"
       - run: npm ci --no-fund
         env:
           NPM_CONFIG_LOGLEVEL: error
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
       - run: npm test -- --forceExit
 
   build-and-push:
@@ -38,10 +42,10 @@ jobs:
       id-token: write
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       # ── Build JS bundle natively (avoids esbuild crashing under QEMU) ──────
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: "20"
           cache: "npm"
@@ -52,14 +56,14 @@ jobs:
 
       # ── Multi-platform builder ─────────────────────────────────────────────
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
 
       # ── Auth ──────────────────────────────────────────────────────────────
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -68,7 +72,7 @@ jobs:
       # ── Tags & Labels ─────────────────────────────────────────────────────
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -84,10 +88,10 @@ jobs:
             org.opencontainers.image.description=MCP Server for Microsoft Graph API (delegated permissions)
             org.opencontainers.image.vendor=${{ github.repository_owner }}
 
-      # ── Build & Push ──────────────────────────────────────────────────────
+      # ── Build & Push (with SBOM + provenance attestations) ─────────────────
       - name: Build and push
         id: push
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -96,11 +100,23 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # Generate an SBOM and max-level provenance attestation (audit CICD-2)
+          sbom: true
+          provenance: mode=max
 
       # ── Provenance attestation ────────────────────────────────────────────
       - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
+
+      # ── Keyless signature (Sigstore/cosign, OIDC) ─────────────────────────
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - name: Sign the published image
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "${REGISTRY}/${IMAGE_NAME}@${DIGEST}"
