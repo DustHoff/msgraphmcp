@@ -1,8 +1,14 @@
-# Internal-network Ingress for msgraphmcp
+# Public Ingress for msgraphmcp
 #
 # Prerequisites:
-#   - An Ingress controller installed (nginx-ingress, traefik, …)
-#   - Replace the hostname below with one that resolves in your internal DNS
+#   - An Ingress controller installed (nginx-ingress)
+#   - cert-manager (or a pre-provisioned TLS secret) for HTTPS
+#   - Replace the hostname below with your public DNS name; it MUST match the
+#     Entra redirect URI host in deployment.yaml (AZURE_REDIRECT_URI)
+#
+# Access control: /mcp is protected at the application layer by the MCP_AUTH_TOKEN
+# bearer gate (see deployment.yaml / secret.yaml). TLS below ensures that token and
+# the mcp-session-id are never transmitted in cleartext (audit finding INGRESS-2).
 #
 # Apply with:
 #   kubectl apply -f k8s/ingress.yaml
@@ -14,20 +20,37 @@ metadata:
   labels:
     app.kubernetes.io/name: msgraphmcp
   annotations:
+    # ── TLS ──────────────────────────────────────────────────────────────────
+    # Automatic certificate issuance via cert-manager. Replace with your issuer
+    # (or omit and pre-create the `msgraphmcp-tls` secret yourself).
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    # Force HTTPS: redirect any plaintext request before it reaches the app.
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    # HSTS: instruct browsers to only ever use HTTPS for this host.
+    nginx.ingress.kubernetes.io/hsts: "true"
+    nginx.ingress.kubernetes.io/hsts-max-age: "31536000"
+    nginx.ingress.kubernetes.io/hsts-include-subdomains: "false"
+    # ── SSE / streaming ──────────────────────────────────────────────────────
     # Keep long-lived SSE connections open (GET /mcp streams)
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
     # Disable buffering so SSE events are forwarded immediately
     nginx.ingress.kubernetes.io/proxy-buffering: "off"
     nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
-    # Restrict access to internal networks only
-    nginx.ingress.kubernetes.io/whitelist-source-range: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+    # ── Optional extra hardening ─────────────────────────────────────────────
+    # The MCP_AUTH_TOKEN gate authenticates clients at the application layer, so a
+    # public source range is supported. To additionally restrict by network (defence
+    # in depth), uncomment and adjust:
+    # nginx.ingress.kubernetes.io/whitelist-source-range: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 spec:
   # Set ingressClassName to match your cluster's Ingress controller.
-  # Common values: nginx, traefik, kong
   ingressClassName: nginx
+  tls:
+    - hosts:
+        - msgraph.os.hoffnet.onesi.de    # must match the rules host and the Entra redirect URI host
+      secretName: msgraphmcp-tls
   rules:
-    - host: msgraphmcp.internal    # Replace with your internal DNS hostname
+    - host: msgraph.os.hoffnet.onesi.de    # Replace with your public DNS hostname
       http:
         paths:
           - path: /

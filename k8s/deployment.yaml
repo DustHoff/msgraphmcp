@@ -56,8 +56,13 @@ spec:
               value: /data/tokens.json
             - name: NODE_ENV
               value: production
+            # Production logging defaults: warn level and no Graph request/response
+            # body logging. GRAPH_DEBUG defaults ON in code and would otherwise log
+            # full Graph payloads incl. PII / Intune encryption keys (audit LOG-1/LOG-2).
             - name: LOG_LEVEL
-              value: info
+              value: warn
+            - name: GRAPH_DEBUG
+              value: "false"
             # Azure credentials from Secret
             - name: AZURE_CLIENT_ID
               valueFrom:
@@ -69,37 +74,34 @@ spec:
                 secretKeyRef:
                   name: msgraphmcp-azure
                   key: AZURE_TENANT_ID
-            # ── Auth mode: uncomment ONE of the blocks below ────────────────
+            # ── Auth mode: Authorization Code + PKCE (delegated, per-user) ──
+            # This is the ONLY mode permitted for public / HTTP exposure. The server
+            # refuses to start in app-only (client-secret / client-certificate) or
+            # device-code mode over HTTP unless MCP_ALLOW_INSECURE_AUTH_MODE=true
+            # (audit findings AUTH-1 / AUTH-4).
             #
-            # Option A — Authorization Code + PKCE (delegated, recommended for HTTP mode)
-            # Requires: AZURE_CLIENT_SECRET + AZURE_REDIRECT_URI.
             # Register https://<your-host>/auth/callback as a redirect URI in Entra ID.
-            # After deploying, visit https://<your-host>/auth/login to authenticate.
-            # - name: AZURE_CLIENT_SECRET
-            #   valueFrom:
-            #     secretKeyRef:
-            #       name: msgraphmcp-azure
-            #       key: AZURE_CLIENT_SECRET
-            # - name: AZURE_REDIRECT_URI
-            #   value: https://msgraph.os.hoffnet.onesi.de/auth/callback
-            #
-            # Option B — Client Secret / app-only (no user context, needs Application permissions)
-            # - name: AZURE_CLIENT_SECRET
-            #   valueFrom:
-            #     secretKeyRef:
-            #       name: msgraphmcp-azure
-            #       key: AZURE_CLIENT_SECRET
-            #
-            # Option C — Client Certificate (app-only, preferred for production)
-            # Step 1: store the SHA-256 thumbprint in the Secret (secret.yaml)
-            # Step 2: mount the PEM private key as a file (see volumes below)
-            # - name: AZURE_CLIENT_CERTIFICATE_PATH
-            #   value: /mnt/cert/tls.key
-            # - name: AZURE_CLIENT_CERTIFICATE_THUMBPRINT
-            #   valueFrom:
-            #     secretKeyRef:
-            #       name: msgraphmcp-azure
-            #       key: AZURE_CLIENT_CERTIFICATE_THUMBPRINT
+            - name: AZURE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: msgraphmcp-azure
+                  key: AZURE_CLIENT_SECRET
+            - name: AZURE_REDIRECT_URI
+              value: https://msgraph.os.hoffnet.onesi.de/auth/callback
+
+            # ── Inbound auth gate for /mcp (audit CSRF-1 / AUTH-1) ───────────
+            # High-entropy bearer token required on every /mcp request, so only
+            # authorized MCP clients can open a session or obtain a login URL.
+            # Generate with: openssl rand -hex 32
+            # Configure Claude Code (the MCP client) with:
+            #   claude mcp add --transport http msgraphmcp \
+            #       https://msgraph.os.hoffnet.onesi.de/mcp \
+            #       --header "Authorization: Bearer <token>"
+            - name: MCP_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: msgraphmcp-azure
+                  key: MCP_AUTH_TOKEN
 
           volumeMounts:
             - name: token-cache
